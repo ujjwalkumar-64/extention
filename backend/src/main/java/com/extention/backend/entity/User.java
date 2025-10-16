@@ -1,10 +1,11 @@
 package com.extention.backend.entity;
 
-import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
+import jakarta.persistence.*;
 import lombok.*;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.LastModifiedDate;
+
+import java.time.LocalDateTime;
 
 @Entity
 @Getter
@@ -19,6 +20,12 @@ public class User {
     private String fullName;
     private String username;
     private String password;
+    @CreatedDate
+    @Column(updatable = false, nullable = false)
+    private LocalDateTime createdDate;
+    @LastModifiedDate
+    @Column(nullable = false)
+    private LocalDateTime lastModifiedDate;
 
 
 }

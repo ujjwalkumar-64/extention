@@ -14,5 +14,10 @@ spring:
   application:
     name: genieBackend
 
+
 server:
   port: 8098
+
+application:
+  config:
+    GEMINI_API_KEY: AIzaSyD7coKlIb1Wey8P2rHVHYoaiHB4stzCbZE
