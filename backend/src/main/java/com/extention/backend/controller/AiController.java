@@ -39,6 +39,7 @@ public class AiController {
             case "explain" -> Action.explain;
             case "translate" -> Action.translate;
             case "proofread" -> Action.proofread;
+            case "comment_code" -> Action.comment_code;
             // Unknown/unsupported (e.g., "comment_code") -> return null so we 400
             default -> null;
         };

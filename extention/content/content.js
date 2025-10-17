@@ -72,6 +72,7 @@
             if (msg.operation === "summarize") runSimpleOp("summarize");
             if (msg.operation === "explain") runSimpleOp("explain");
             if (msg.operation === "translate") runTranslationOverlay();
+            if (msg.operation === "quick_comment") insertCodeComments();
         }
         if (msg?.type === "PAGEGENIE_TOAST" && msg.message) {
             showToast(msg.message);
@@ -161,7 +162,8 @@
             return;
         }
         try {
-            const result = await runAI("comment_code", codeText, settings.targetLang);
+            const resultRaw = await runAI("comment_code", codeText, settings.targetLang);
+            const result = stripMarkdownCodeFences(resultRaw);
             setCodeText(codeEl, result);
             showToast("Inserted explainer comments");
             persist("/api/ops/log", {
@@ -272,7 +274,6 @@
         }
 
         const payload = { text, action, targetLang };
-
         const resp = await persist("/api/v1/ai", payload);
         if (!resp?.ok) throw new Error(resp?.error || "Backend AI request failed");
 
@@ -281,7 +282,22 @@
         return result;
     }
 
-// Accepts multiple backend response shapes, e.g. {result:"..."}, {output:"..."}, {data:{output:"..."}}, "..."
+    // Map operations to backend enum values (now includes comment_code)
+    function opToAction(op) {
+        switch (op) {
+            case "summarize":
+            case "rewrite":
+            case "explain":
+            case "translate":
+            case "proofread":
+            case "comment_code": // enable online path for code comments
+                return op;
+            default:
+                return null;
+        }
+    }
+
+    // Accept multiple backend response shapes
     function extractAIResult(data) {
         if (!data) return "";
         if (typeof data === "string") return data;
@@ -292,19 +308,19 @@
         return "";
     }
 
-    function opToAction(op) {
-        // Map operations to backend enum values
-        switch (op) {
-            case "summarize":
-            case "rewrite":
-            case "explain":
-            case "translate":
-            case "proofread":
-                return op; // same strings in your Action enum
-            // "comment_code" is on-device only; no backend mapping
-            default:
-                return null;
+    // Utility: strip Markdown code fences that models sometimes include
+    function stripMarkdownCodeFences(s) {
+        if (!s) return s;
+        // Remove leading/trailing triple backticks with optional language
+        // ```lang\n ... \n```
+        const fenceRegex = /^```[\w+-]*\s*\n([\s\S]*?)\n```$/m;
+        const m = s.match(fenceRegex);
+        if (m && m[1]) return m[1];
+        // Also handle inline single-fence cases
+        if (s.startsWith("```") && s.endsWith("```")) {
+            return s.replace(/^```[\w+-]*\s*\n?/, "").replace(/```$/, "");
         }
+        return s;
     }
 
     // Robust persist with invalidated-context and lastError handling
@@ -487,24 +503,48 @@
 
     // Categories + Suggestions UI
 
+    // Robust JSON parser: handles plain objects, strings, and double-encoded JSON strings
     function safeParseJson(s) {
         if (!s) return null;
         if (typeof s === "object") return s;
-        try { return JSON.parse(s); } catch { return null; }
+        if (typeof s !== "string") return null;
+
+        // Try direct parse
+        try { return JSON.parse(s); } catch {}
+
+        // Handle quoted/double-encoded JSON e.g. "\"{...}\""
+        const trimmed = s.trim();
+        const looksQuoted = (trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"));
+        if (looksQuoted) {
+            try {
+                const unquoted = JSON.parse(trimmed);
+                if (typeof unquoted === "string") {
+                    try { return JSON.parse(unquoted); } catch {}
+                } else if (typeof unquoted === "object") {
+                    return unquoted;
+                }
+            } catch {}
+        }
+        return null;
     }
 
-    // Accept arrays, single object, or wrapped data/items arrays
+    // Accept arrays, single object, or wrapped data/items/suggestions arrays
     function normalizeSuggestionsShape(raw) {
         if (!raw) return [];
         if (Array.isArray(raw)) return raw;
         if (Array.isArray(raw.data)) return raw.data;
         if (Array.isArray(raw.items)) return raw.items;
+        if (Array.isArray(raw.suggestions)) return raw.suggestions;
         if (typeof raw === "object" && (raw.suggestedUrl || raw.url)) return [raw];
         return [];
     }
 
+    // Show categories bubble even if selection range is gone (fallback to toolbar or viewport)
     function showCategoriesBubbleWithFallback(categories) {
-        if (!categories) return;
+        if (!categories) {
+            showMinimalBubble("Note saved");
+            return;
+        }
 
         // Try the live selection range first
         const range = (() => {
@@ -559,6 +599,27 @@
             };
             document.addEventListener("click", hide, true);
         }, 0);
+    }
+
+    // Minimal fallback bubble if categories are missing
+    function showMinimalBubble(text) {
+        const bubble = document.createElement("div");
+        bubble.className = "pagegenie-categories-bubble";
+        bubble.textContent = text || "Note saved";
+        Object.assign(bubble.style, {
+            position: "fixed",
+            top: (lastAnchorPos?.top ? Math.max(8, lastAnchorPos.top - 10) : window.scrollY + 20) + "px",
+            left: (lastAnchorPos?.left ? Math.max(8, lastAnchorPos.left) : window.scrollX + 20) + "px",
+            zIndex: "2147483647",
+            background: "rgba(20,20,20,0.96)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: "10px",
+            padding: "10px 12px",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
+        });
+        document.documentElement.appendChild(bubble);
+        setTimeout(() => bubble.remove(), 2500);
     }
 
     function showSuggestionsPanel(suggestions) {
@@ -745,10 +806,14 @@
         }
     }
 
-    // Dev/test hook to force suggestions panel from console:
+    // Dev/test hooks:
     // window.__pg_showSuggestions([{ suggestedUrl: "https://example.com", title: "Example", reason: "Why it matters" }])
     window.__pg_showSuggestions = function(example) {
         const arr = normalizeSuggestionsShape(example);
         if (arr.length) showSuggestionsPanel(arr);
+    };
+    // window.__pg_showCategories({ topic: "Topic", tags:["A","B"], relatedTo:["X"], summary:"..." })
+    window.__pg_showCategories = function(obj) {
+        try { showCategoriesBubbleWithFallback(obj); } catch (e) { /* ignore */ }
     };
 })();

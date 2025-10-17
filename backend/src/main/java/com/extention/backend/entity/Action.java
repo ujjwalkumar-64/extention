@@ -7,4 +7,5 @@ public enum Action {
     translate,
     proofread,
     flashcard,
+    comment_code
 }

@@ -25,6 +25,17 @@ public class AiServiceImpl implements AiService {
             case translate -> "Translate the following text to %s:\n%s".formatted(aiRequest.targetLang(), text);
             case proofread -> "Proofread and correct grammatical errors. Keep original meaning and voice:\n" + text;
             case flashcard -> "Generate a Q&A style flashcard from this text:\n" + text;
+            case comment_code -> """
+                Add clear, helpful explanatory comments to the following code without changing its behavior.
+                Rules:
+                - Use the appropriate comment syntax for the code's language (e.g., // or /* */ for C/Java/JS, # for Python, -- for SQL, etc.).
+                - Keep comments concise and place them near lines they explain.
+                - Do NOT wrap the output in Markdown code fences.
+                - Return ONLY the fully commented code.
+
+                Code:
+                %s
+                """.formatted(text);
         };
     }
 
