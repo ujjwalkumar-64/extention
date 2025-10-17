@@ -4,6 +4,7 @@ import com.extention.backend.entity.User;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -47,6 +48,17 @@ public class JWTUtil {
         catch (JwtException e){
             return null;
         }
+    }
+
+
+
+    public boolean validateToken(String token, UserDetails userDetails) {
+        String username = extractUsername(token);
+        return username != null && username.equals(userDetails.getUsername());
+    }
+
+    public String extractUsername(String token) {
+        return validateAndExtractUsername(token);
     }
 }
 

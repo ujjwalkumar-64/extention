@@ -28,6 +28,7 @@ public class User implements UserDetails {
     private Long id;
 
     private String fullName;
+    @Column(unique = true)
     private String username;
     private String password;
 

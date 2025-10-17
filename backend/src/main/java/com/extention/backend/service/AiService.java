@@ -7,5 +7,9 @@ import org.springframework.stereotype.Service;
 @Service
 public interface AiService {
     AiResponse process(AiRequest aiRequest);
+    String generateQuizJson(String title, String text);
+    String categorizeNoteJson(String text);
+    String selectSuggestionsJson(String baseSummary, String candidatesJson);
+
 
 }

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PageGenie",
   "description": "Browser-native AI assistant for summarizing, explaining, rewriting, translating, and instant DOM injection.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "action": {
     "default_title": "PageGenie",
     "default_popup": "popup/popup.html"
@@ -11,7 +11,8 @@
     "storage",
     "scripting",
     "activeTab",
-    "contextMenus"
+    "contextMenus",
+    "tabs"
   ],
   "host_permissions": [
     "http://localhost:8098/*",
@@ -24,11 +25,10 @@
 
   "content_scripts": [
     {
-      "matches": [
-        "<all_urls>"
-      ],
+      "matches": ["<all_urls>"],
       "js": [
-        "content/content.js"
+        "content/content.js",
+        "content/toast.js"
       ],
       "css": [
         "content/toolbar.css"
