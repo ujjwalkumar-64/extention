@@ -1,0 +1,11 @@
+{
+  "name": "pagegenie-extension",
+  "version": "1.0.0",
+  "description": "Chrome Extension for AI-powered reading and writing assistance using Gemini Nano and Spring Boot backend.",
+  "scripts": {
+    "start": "echo 'Load via chrome://extensions'",
+    "lint": "eslint ."
+  },
+  "author": "Ujjwal Kumar",
+  "license": "MIT"
+}

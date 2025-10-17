@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PageGenie</title>
+    <style>
+        body { font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; width: 320px; }
+        .row { margin-bottom: 10px; }
+        label { display: flex; align-items: center; gap: 8px; }
+        select, input[type="checkbox"], input[type="text"], input[type="password"] { font: inherit; }
+        .hint { color: #666; font-size: 12px; }
+        .section { border-top: 1px solid #eee; padding-top: 10px; margin-top: 10px; }
+        .status-ok { color: #0a0; }
+        .status-err { color: #a00; }
+    </style>
+</head>
+<body>
+<h3>PageGenie</h3>
+
+<div class="row">
+    <label>
+        Mode:
+        <select id="mode">
+            <option value="auto">Auto (Offline → Online)</option>
+            <option value="offline-only">Offline only</option>
+            <option value="online-only">Online only</option>
+        </select>
+    </label>
+</div>
+
+<div class="row">
+    <label>
+        <input type="checkbox" id="toolbar" />
+        Show toolbar on selection
+    </label>
+</div>
+
+<div class="row">
+    <label>
+        Target language:
+        <select id="lang">
+            <option value="en">English (en)</option>
+            <option value="es">Spanish (es)</option>
+            <option value="fr">French (fr)</option>
+            <option value="de">German (de)</option>
+            <option value="hi">Hindi (hi)</option>
+            <option value="ja">Japanese (ja)</option>
+            <option value="zh">Chinese (zh)</option>
+        </select>
+    </label>
+</div>
+
+<div class="section">
+    <strong>Login</strong>
+    <div class="row">
+        <input type="text" id="username" placeholder="Username" autocomplete="username" />
+    </div>
+    <div class="row">
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
+    </div>
+    <div class="row">
+        <button id="login">Log In</button>
+        <button id="logout">Log Out</button>
+    </div>
+    <div id="authStatus" class="hint"></div>
+    <div class="hint">Backend URL is configured in Options. Token is read from the Authorization response header.</div>
+</div>
+
+<div class="row hint">
+    Offline uses on-device AI when available. Online uses your Spring Boot backend.
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

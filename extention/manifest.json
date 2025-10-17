@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "PageGenie",
+  "description": "Browser-native AI assistant for summarizing, explaining, rewriting, translating, and instant DOM injection.",
+  "version": "0.1.1",
+  "action": {
+    "default_title": "PageGenie",
+    "default_popup": "popup/popup.html"
+  },
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "http://localhost:8098/*",
+    "https://localhost:8098/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/toolbar.css"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/pageBridge.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "options_page": "options/options.html"
+}

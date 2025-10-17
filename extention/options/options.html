@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PageGenie Options</title>
+    <style>
+        body { font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; max-width: 720px; }
+        label { display: block; margin: 12px 0 4px; }
+        input[type="text"], input[type="password"] { width: 100%; padding: 8px; font: inherit; }
+        .row { margin-bottom: 16px; }
+        .muted { color: #666; font-size: 12px; }
+        .ok { color: #0a0; }
+        .err { color: #a00; }
+    </style>
+</head>
+<body>
+<h2>PageGenie Options</h2>
+
+<div class="row">
+    <label>Spring Boot Backend URL</label>
+    <input type="text" id="backendUrl" placeholder="https://your-backend.example.com" />
+    <div class="muted">Used for persistence/history/export and online AI fallback.</div>
+</div>
+
+<div class="row">
+    <label>API Token (optional)</label>
+    <input type="password" id="apiToken" placeholder="Bearer token if required" />
+</div>
+
+<div class="row">
+    <button id="save">Save</button>
+    <button id="test">Test Connection</button>
+    <span id="status"></span>
+</div>
+
+<script src="options.js"></script>
+</body>
+</html>
