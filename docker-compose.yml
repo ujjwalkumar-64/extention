@@ -5,6 +5,7 @@ services:
     environment:
         POSTGRES_USER: ujjwal
         POSTGRES_PASSWORD: ujjwal
+        POSTGRES_DB: genie_project
         PGDATA: /data/postgres
         TZ: UTC
     volumes:

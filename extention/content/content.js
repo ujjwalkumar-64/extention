@@ -1,10 +1,15 @@
-// Content script: selection UI, AI operations, and DOM injection
+// PageGenie content script
+// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save)
+// - Quick-Fix DOM Injection (Replace with Proofread, Translation Overlay, Insert Code Comments)
+// - Offline (on-device) AI via pageBridge + Online fallback via Spring Boot (/api/v1/ai)
+// - Save Note shows Categories bubble + Curated Reading side panel
+// - Robust background messaging with "extension context invalidated" guard
 
 (function init() {
-    // Inject the page-bridge to access on-device AI APIs from page context
+    // Inject the page-bridge to access on-device AI APIs from page context (window.ai / Prompt API)
     injectPageBridge();
 
-    // State from storage
+    // Settings state
     let settings = {
         mode: "auto", // "auto" | "offline-only" | "online-only"
         showToolbarOnSelection: true,
@@ -28,6 +33,7 @@
     const toolbar = createToolbar();
     let lastSelectionText = "";
     let lastRange = null;
+    let lastAnchorPos = null; // fallback anchor for bubbles if selection collapses
 
     document.addEventListener("selectionchange", () => {
         if (!settings.showToolbarOnSelection) {
@@ -48,6 +54,7 @@
         lastRange = selection.getRangeAt(0).cloneRange();
         const rect = getRangeRect(lastRange);
         toolbar.show(rect);
+        lastAnchorPos = { top: rect.top, left: rect.left };
     });
 
     document.addEventListener("mouseup", () => {
@@ -58,14 +65,16 @@
         }, 50);
     });
 
-    // Handle context menu relay
+    // Handle context menu relay and toasts from background
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg?.type === "PAGEGENIE_CONTEXT_ACTION") {
-            // Trigger operation based on current selection
             if (!lastRange || !lastSelectionText) return;
             if (msg.operation === "summarize") runSimpleOp("summarize");
             if (msg.operation === "explain") runSimpleOp("explain");
             if (msg.operation === "translate") runTranslationOverlay();
+        }
+        if (msg?.type === "PAGEGENIE_TOAST" && msg.message) {
+            showToast(msg.message);
         }
     });
 
@@ -80,14 +89,14 @@
     toolbar.on("quick_overlay", () => runTranslationOverlay());
     toolbar.on("quick_comment", () => insertCodeComments());
 
+    // Simple result operations (non-injection)
     async function runSimpleOp(op) {
         if (!lastSelectionText) return;
         try {
             const result = await runAI(op, lastSelectionText, settings.targetLang);
             showToast(opTitle(op) + " ready");
-            // Optionally copy to clipboard or show small panel
             showResultPanel(result);
-            // Persist
+            // Persist op log (optional)
             persist("/api/ops/log", {
                 type: op,
                 source: location.href,
@@ -96,10 +105,11 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + e.message);
+            showToast("AI error: " + (e?.message || e));
         }
     }
 
+    // Quick-Fix: Replace selection with proofread text
     async function replaceWithProofread() {
         if (!lastRange || !lastSelectionText) return;
         try {
@@ -114,10 +124,11 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + e.message);
+            showToast("AI error: " + (e?.message || e));
         }
     }
 
+    // Quick-Fix: Translation overlay bubble
     async function runTranslationOverlay() {
         if (!lastRange || !lastSelectionText) return;
         try {
@@ -133,10 +144,11 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + e.message);
+            showToast("AI error: " + (e?.message || e));
         }
     }
 
+    // Quick-Fix: Insert code comments in nearest code block
     async function insertCodeComments() {
         const codeEl = findNearestCodeBlock(getSelectionAnchorNode());
         if (!codeEl) {
@@ -160,10 +172,11 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + e.message);
+            showToast("AI error: " + (e?.message || e));
         }
     }
 
+    // Save note: persist to backend, show categories bubble, then curated reading panel
     async function saveNote() {
         if (!lastSelectionText) return;
         const payload = {
@@ -171,11 +184,39 @@
             content: lastSelectionText,
             ts: Date.now()
         };
+
         const res = await persist("/api/notes", payload);
-        showToast(res.ok ? "Note saved" : ("Save failed: " + (res.error || "")));
+
+        if (!res?.ok) {
+            showToast(res?.error ? `Save failed: ${res.error}` : "Save failed");
+            if (String(res?.error || "").toLowerCase().includes("extension context invalidated")) {
+                showToast("Extension reloaded. Refresh this page and try again.");
+            }
+            return;
+        }
+
+        showToast("Note saved");
+
+        // 1) Parse and show categories (topic/tags/related/summary)
+        const categories = safeParseJson(res.data?.categoriesJson);
+        try {
+            showCategoriesBubbleWithFallback(categories);
+        } catch {}
+
+        // 2) Curated Reading List (optional; requires auth if backend protects it)
+        try {
+            const suggestResp = await persist("/api/v1/reading/suggest", {
+                baseUrl: location.href,
+                baseSummary: categories?.summary || lastSelectionText.slice(0, 400)
+            });
+            if (suggestResp?.ok) {
+                const suggestions = normalizeSuggestionsShape(suggestResp.data);
+                if (suggestions.length) showSuggestionsPanel(suggestions);
+            }
+        } catch {}
     }
 
-    // AI Routing: offline → fallback online (or per settings)
+    // AI routing: offline → online (or per settings)
     async function runAI(op, text, targetLang) {
         const tryOffline = settings.mode !== "online-only";
         const tryOnline = settings.mode !== "offline-only";
@@ -185,7 +226,7 @@
                 const res = await aiOnDevice(op, text, targetLang);
                 if (res) return res;
             } catch (e) {
-                // fall through
+                // fall through to online
             }
         }
         if (!tryOnline) throw new Error("On-device AI unavailable.");
@@ -195,7 +236,7 @@
         return online;
     }
 
-    // On-device AI via bridge
+    // On-device AI via page bridge (window.postMessage)
     function aiOnDevice(operation, text, targetLang) {
         return new Promise((resolve, reject) => {
             const id = "pg_" + Math.random().toString(36).slice(2);
@@ -223,51 +264,76 @@
         });
     }
 
-    // Online via Spring Boot backend (updated to your /api/v1/ai + schema)
+    // Online AI via Spring Boot backend (/api/v1/ai)
     async function aiOnline(operation, text, targetLang) {
         const action = opToAction(operation);
         if (!action) {
             throw new Error("Operation not supported by backend: " + operation);
         }
 
-        const payload = {
-            text,
-            action,      // enum string expected by backend
-            targetLang
-        };
+        const payload = { text, action, targetLang };
 
-        const resp = await new Promise(resolve => {
-            chrome.runtime.sendMessage(
-                {
-                    type: "PAGEGENIE_PERSIST",
-                    endpoint: "/api/v1/ai",
-                    payload
-                },
-                resolve
-            );
-        });
-
+        const resp = await persist("/api/v1/ai", payload);
         if (!resp?.ok) throw new Error(resp?.error || "Backend AI request failed");
 
-        const result = resp.data?.output;
-        if (typeof result !== "string") {
-            throw new Error("Invalid backend response");
-        }
+        const result = extractAIResult(resp.data);
+        if (!result) throw new Error("Invalid backend AI response");
         return result;
     }
 
+// Accepts multiple backend response shapes, e.g. {result:"..."}, {output:"..."}, {data:{output:"..."}}, "..."
+    function extractAIResult(data) {
+        if (!data) return "";
+        if (typeof data === "string") return data;
+        if (typeof data.result === "string") return data.result;
+        if (typeof data.output === "string") return data.output;
+        if (data.data && typeof data.data.result === "string") return data.data.result;
+        if (data.data && typeof data.data.output === "string") return data.data.output;
+        return "";
+    }
+
     function opToAction(op) {
-        // Map content operations to backend enum values
+        // Map operations to backend enum values
         switch (op) {
             case "summarize":
             case "rewrite":
             case "explain":
             case "translate":
             case "proofread":
-                return op; // identical strings in your Action enum
+                return op; // same strings in your Action enum
+            // "comment_code" is on-device only; no backend mapping
             default:
-                return null; // unsupported by backend (e.g., "comment_code")
+                return null;
         }
+    }
+
+    // Robust persist with invalidated-context and lastError handling
+    function persist(endpoint, payload) {
+        return new Promise(resolve => {
+            try {
+                if (!chrome?.runtime?.id) {
+                    return resolve({ ok: false, error: "Extension context invalidated. Refresh page and try again." });
+                }
+                chrome.runtime.sendMessage(
+                    {
+                        type: "PAGEGENIE_PERSIST",
+                        endpoint,
+                        payload
+                    },
+                    (resp) => {
+                        if (chrome.runtime.lastError) {
+                            return resolve({ ok: false, error: chrome.runtime.lastError.message || "Message failed" });
+                        }
+                        if (typeof resp === "undefined") {
+                            return resolve({ ok: false, error: "No response from background. Extension may have reloaded. Refresh page." });
+                        }
+                        resolve(resp);
+                    }
+                );
+            } catch (e) {
+                resolve({ ok: false, error: e?.message || String(e) });
+            }
+        });
     }
 
     // DOM helpers
@@ -283,6 +349,7 @@
         newRange.setStart(textNode, 0);
         newRange.setEnd(textNode, textNode.nodeValue.length);
         sel.addRange(newRange);
+        lastRange = newRange;
     }
 
     function showTranslationBubble(range, text) {
@@ -353,10 +420,26 @@
         const el = document.createElement("div");
         el.className = "pagegenie-toast";
         el.textContent = message;
+        Object.assign(el.style, {
+            position: "fixed",
+            left: "20px",
+            bottom: "20px",
+            background: "rgba(30,30,30,0.95)",
+            color: "#fff",
+            padding: "10px 14px",
+            borderRadius: "8px",
+            opacity: "0",
+            transform: "translateY(10px)",
+            transition: "all .25s ease",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+        });
         document.documentElement.appendChild(el);
-        setTimeout(() => el.classList.add("show"), 10);
+        setTimeout(() => el.style.opacity = "1", 10);
         setTimeout(() => {
-            el.classList.remove("show");
+            el.style.opacity = "0";
+            el.style.transform = "translateY(10px)";
             setTimeout(() => el.remove(), 300);
         }, 2000);
     }
@@ -364,7 +447,27 @@
     function showResultPanel(text) {
         const panel = document.createElement("div");
         panel.className = "pagegenie-result-panel";
+        Object.assign(panel.style, {
+            position: "fixed",
+            right: "20px",
+            bottom: "20px",
+            width: "min(520px, 50vw)",
+            maxHeight: "50vh",
+            overflow: "auto",
+            background: "#121212",
+            color: "#eee",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: "8px",
+            padding: "12px",
+            zIndex: "2147483647"
+        });
         const pre = document.createElement("pre");
+        Object.assign(pre.style, {
+            whiteSpace: "pre-wrap",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+            fontSize: "12px",
+            margin: "0 0 8px 0"
+        });
         pre.textContent = text;
         const copyBtn = document.createElement("button");
         copyBtn.textContent = "Copy";
@@ -382,17 +485,169 @@
         document.documentElement.appendChild(panel);
     }
 
-    function persist(endpoint, payload) {
-        return new Promise(resolve => {
-            chrome.runtime.sendMessage(
-                {
-                    type: "PAGEGENIE_PERSIST",
-                    endpoint,
-                    payload
-                },
-                resolve
-            );
+    // Categories + Suggestions UI
+
+    function safeParseJson(s) {
+        if (!s) return null;
+        if (typeof s === "object") return s;
+        try { return JSON.parse(s); } catch { return null; }
+    }
+
+    // Accept arrays, single object, or wrapped data/items arrays
+    function normalizeSuggestionsShape(raw) {
+        if (!raw) return [];
+        if (Array.isArray(raw)) return raw;
+        if (Array.isArray(raw.data)) return raw.data;
+        if (Array.isArray(raw.items)) return raw.items;
+        if (typeof raw === "object" && (raw.suggestedUrl || raw.url)) return [raw];
+        return [];
+    }
+
+    function showCategoriesBubbleWithFallback(categories) {
+        if (!categories) return;
+
+        // Try the live selection range first
+        const range = (() => {
+            const sel = document.getSelection();
+            if (sel && sel.rangeCount) return sel.getRangeAt(0).cloneRange();
+            return lastRange || null;
+        })();
+
+        const rect = range ? getRangeRect(range) :
+            lastAnchorPos ? { top: lastAnchorPos.top - 10, left: lastAnchorPos.left } :
+                { top: window.scrollY + 20, left: window.scrollX + 20 };
+
+        const bubble = document.createElement("div");
+        bubble.className = "pagegenie-categories-bubble";
+
+        const topic = categories?.topic || "Note saved";
+        const tags = Array.isArray(categories?.tags) ? categories.tags : [];
+        const related = Array.isArray(categories?.relatedTo) ? categories.relatedTo : [];
+        const summary = categories?.summary || "";
+
+        bubble.innerHTML = `
+      <div class="pgc-title">📘 ${escapeHtml(topic)}</div>
+      ${ tags.length ? `<div class="pgc-row"><span class="pgc-label">Tags:</span> ${tags.map(t => `<span class="pgc-chip">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
+      ${ related.length ? `<div class="pgc-row"><span class="pgc-label">Related:</span> ${related.map(t => `<span class="pgc-chip subtle">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
+      ${ summary ? `<div class="pgc-summary">${escapeHtml(summary)}</div>` : "" }
+      <div class="pgc-actions"><button class="pgc-close">Close</button></div>
+    `;
+
+        Object.assign(bubble.style, {
+            position: "fixed",
+            top: Math.max(8, rect.top) + "px",
+            left: Math.max(8, rect.left) + "px",
+            zIndex: "2147483647",
+            background: "rgba(20,20,20,0.96)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: "10px",
+            padding: "10px 12px",
+            maxWidth: "min(420px, 60vw)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
         });
+
+        document.documentElement.appendChild(bubble);
+        bubble.querySelector(".pgc-close")?.addEventListener("click", () => bubble.remove());
+        // Auto-hide on outside click
+        setTimeout(() => {
+            const hide = (e) => {
+                if (!bubble.contains(e.target)) {
+                    bubble.remove();
+                    document.removeEventListener("click", hide, true);
+                }
+            };
+            document.addEventListener("click", hide, true);
+        }, 0);
+    }
+
+    function showSuggestionsPanel(suggestions) {
+        if (!Array.isArray(suggestions) || !suggestions.length) return;
+
+        const panel = document.createElement("div");
+        panel.className = "pagegenie-suggestions-panel";
+
+        Object.assign(panel.style, {
+            position: "fixed",
+            right: "20px",
+            bottom: "20px",
+            width: "min(420px, 50vw)",
+            maxHeight: "60vh",
+            overflow: "auto",
+            background: "#111",
+            color: "#eee",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: "10px",
+            padding: "12px",
+            zIndex: "2147483647",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
+        });
+
+        const header = document.createElement("div");
+        header.textContent = "🧭 Curated Reading";
+        header.style.fontWeight = "700";
+        header.style.marginBottom = "8px";
+        panel.appendChild(header);
+
+        suggestions.slice(0, 3).forEach(s => {
+            const href = s.suggestedUrl || s.url || "#";
+            const title = s.title || href;
+            const reason = s.reason || "";
+            const item = document.createElement("div");
+            item.style.padding = "8px 0";
+            item.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
+
+            const a = document.createElement("a");
+            a.href = href;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
+            a.textContent = title;
+            a.style.color = "#9fd3ff";
+            a.style.textDecoration = "none";
+            a.addEventListener("mouseover", () => a.style.textDecoration = "underline");
+            a.addEventListener("mouseout", () => a.style.textDecoration = "none");
+
+            item.appendChild(a);
+
+            if (reason) {
+                const r = document.createElement("div");
+                r.textContent = reason;
+                r.style.color = "#bbb";
+                r.style.fontSize = "12px";
+                r.style.marginTop = "4px";
+                item.appendChild(r);
+            }
+
+            panel.appendChild(item);
+        });
+
+        const actions = document.createElement("div");
+        actions.style.textAlign = "right";
+        actions.style.marginTop = "8px";
+        const close = document.createElement("button");
+        close.textContent = "Close";
+        Object.assign(close.style, {
+            background: "#222",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.18)",
+            padding: "4px 8px",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontSize: "12px"
+        });
+        close.addEventListener("click", () => panel.remove());
+        actions.appendChild(close);
+        panel.appendChild(actions);
+
+        document.documentElement.appendChild(panel);
+    }
+
+    function escapeHtml(str) {
+        return String(str).replace(/[&<>"']/g, s => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[s]));
+    }
+
+    function escapeAttr(str) {
+        return escapeHtml(str).replace(/"/g, "&quot;");
     }
 
     // UI toolbar
@@ -401,6 +656,21 @@
         const root = document.createElement("div");
         root.className = "pagegenie-toolbar";
         root.style.display = "none";
+
+        Object.assign(root.style, {
+            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+            background: "rgba(26,26,26,0.95)",
+            color: "#fff",
+            padding: "6px 8px",
+            borderRadius: "8px",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.25)",
+            display: "flex",
+            gap: "6px",
+            alignItems: "center",
+            zIndex: "2147483647",
+            userSelect: "none",
+            position: "absolute"
+        });
 
         const actions = [
             { id: "summarize", label: "✨ Summary" },
@@ -420,11 +690,24 @@
                 const sep = document.createElement("span");
                 sep.className = "pagegenie-sep";
                 sep.textContent = a.label;
+                sep.style.color = "rgba(255,255,255,0.45)";
+                sep.style.padding = "0 4px";
                 return sep;
             }
             const b = document.createElement("button");
             b.className = "pagegenie-btn";
             b.textContent = a.label;
+            Object.assign(b.style, {
+                background: "#2f2f2f",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.12)",
+                padding: "4px 8px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                cursor: "pointer"
+            });
+            b.addEventListener("mouseover", () => (b.style.background = "#3a3a3a"));
+            b.addEventListener("mouseout", () => (b.style.background = "#2f2f2f"));
             b.addEventListener("click", (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -440,9 +723,10 @@
         }
         function show(pos) {
             root.style.display = "flex";
-            root.style.position = "absolute";
             root.style.top = (pos.top - 40) + "px";
             root.style.left = pos.left + "px";
+            // Remember last anchor position globally too
+            lastAnchorPos = { top: pos.top, left: pos.left };
         }
         function hide() {
             root.style.display = "none";
@@ -460,4 +744,11 @@
             (document.head || document.documentElement).appendChild(script);
         }
     }
+
+    // Dev/test hook to force suggestions panel from console:
+    // window.__pg_showSuggestions([{ suggestedUrl: "https://example.com", title: "Example", reason: "Why it matters" }])
+    window.__pg_showSuggestions = function(example) {
+        const arr = normalizeSuggestionsShape(example);
+        if (arr.length) showSuggestionsPanel(arr);
+    };
 })();

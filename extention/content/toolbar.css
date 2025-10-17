@@ -84,3 +84,113 @@
     max-width: 480px;
     pointer-events: auto;
 }
+
+
+/* Additions for categories bubble and suggestions panel */
+
+.pagegenie-categories-bubble {
+    background: rgba(20, 20, 20, 0.96);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 10px 12px;
+    max-width: min(420px, 60vw);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+.pagegenie-categories-bubble .pgc-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.pagegenie-categories-bubble .pgc-row {
+    margin: 6px 0;
+}
+.pagegenie-categories-bubble .pgc-label {
+    color: rgba(255,255,255,0.65);
+    margin-right: 6px;
+}
+.pagegenie-categories-bubble .pgc-chip {
+    display: inline-block;
+    background: #2f2f2f;
+    border: 1px solid rgba(255,255,255,0.12);
+    color: #fff;
+    padding: 2px 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    margin: 0 4px 4px 0;
+}
+.pagegenie-categories-bubble .pgc-chip.subtle {
+    background: #242424;
+}
+.pagegenie-categories-bubble .pgc-summary {
+    margin-top: 8px;
+    color: rgba(255,255,255,0.88);
+    font-size: 12px;
+    line-height: 1.4;
+}
+.pagegenie-categories-bubble .pgc-actions {
+    margin-top: 10px;
+    text-align: right;
+}
+.pagegenie-categories-bubble .pgc-actions .pgc-close {
+    background: #3a3a3a;
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.18);
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+/* Suggestions side panel */
+./* Ensure suggestions panel has highest stacking context and looks visible */
+.pagegenie-suggestions-panel {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    width: min(420px, 50vw);
+    max-height: 60vh;
+    overflow: auto;
+    background: #111;
+    color: #eee;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 12px;
+    z-index: 2147483647; /* ensure on top */
+    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+.pagegenie-suggestions-panel .pgs-header {
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.pagegenie-suggestions-panel .pgs-item {
+    padding: 8px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.pagegenie-suggestions-panel .pgs-item:last-child {
+    border-bottom: none;
+}
+.pagegenie-suggestions-panel .pgs-item a {
+    color: #9fd3ff;
+    text-decoration: none;
+}
+.pagegenie-suggestions-panel .pgs-item a:hover {
+    text-decoration: underline;
+}
+.pagegenie-suggestions-panel .pgs-reason {
+    color: #bbb;
+    font-size: 12px;
+    margin-top: 4px;
+}
+.pagegenie-suggestions-panel .pgs-actions {
+    text-align: right;
+    margin-top: 8px;
+}
+.pagegenie-suggestions-panel .pgs-close {
+    background: #222;
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.18);
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12px;
+}

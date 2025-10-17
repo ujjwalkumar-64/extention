@@ -1,37 +1,109 @@
 // Background service worker (MV3)
 
-chrome.runtime.onInstalled.addListener(() => {
-    chrome.contextMenus.create({
-        id: "pagegenie-summarize-selection",
-        title: "PageGenie: Summarize Selection",
-        contexts: ["selection"]
+function setupContextMenus() {
+    chrome.contextMenus.removeAll(() => {
+        chrome.contextMenus.create({
+            id: "pagegenie-summarize-selection",
+            title: "PageGenie: Summarize Selection",
+            contexts: ["selection"]
+        });
+        chrome.contextMenus.create({
+            id: "pagegenie-explain-selection",
+            title: "PageGenie: Explain Selection",
+            contexts: ["selection"]
+        });
+        chrome.contextMenus.create({
+            id: "pagegenie-translate-selection",
+            title: "PageGenie: Translate Selection",
+            contexts: ["selection"]
+        });
+        chrome.contextMenus.create({
+            id: "pagegenie-quiz-page",
+            title: "PageGenie: Quiz Me (Entire Page)",
+            contexts: ["page"]
+        });
     });
-    chrome.contextMenus.create({
-        id: "pagegenie-explain-selection",
-        title: "PageGenie: Explain Selection",
-        contexts: ["selection"]
-    });
-    chrome.contextMenus.create({
-        id: "pagegenie-translate-selection",
-        title: "PageGenie: Translate Selection",
-        contexts: ["selection"]
-    });
-});
+}
+
+chrome.runtime.onInstalled.addListener(setupContextMenus);
+chrome.runtime.onStartup.addListener(setupContextMenus);
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-    if (!tab?.id) return;
-    const op =
-        info.menuItemId === "pagegenie-summarize-selection" ? "summarize" :
-            info.menuItemId === "pagegenie-explain-selection" ? "explain" :
-                info.menuItemId === "pagegenie-translate-selection" ? "translate" :
-                    null;
-    if (!op) return;
+    if (!tab || !tab.id) return;
 
-    chrome.tabs.sendMessage(tab.id, { type: "PAGEGENIE_CONTEXT_ACTION", operation: op });
+    // Selection actions
+    if (info.menuItemId === "pagegenie-summarize-selection") {
+        return chrome.tabs.sendMessage(tab.id, { type: "PAGEGENIE_CONTEXT_ACTION", operation: "summarize" });
+    }
+    if (info.menuItemId === "pagegenie-explain-selection") {
+        return chrome.tabs.sendMessage(tab.id, { type: "PAGEGENIE_CONTEXT_ACTION", operation: "explain" });
+    }
+    if (info.menuItemId === "pagegenie-translate-selection") {
+        return chrome.tabs.sendMessage(tab.id, { type: "PAGEGENIE_CONTEXT_ACTION", operation: "translate" });
+    }
+
+    // Quiz action
+    if (info.menuItemId === "pagegenie-quiz-page") {
+        try {
+            const pageUrl = tab.url || info.pageUrl;
+            if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) {
+                return toast(tab.id, "Quiz Me works only on http/https pages.");
+            }
+
+            const { backendUrl, apiToken } = await chrome.storage.sync.get({
+                backendUrl: "http://localhost:8098",
+                apiToken: ""
+            });
+
+            if (!backendUrl) {
+                return toast(tab.id, "Backend URL not set. Open Options and set http://localhost:8098");
+            }
+
+            if (!apiToken) {
+                return toast(tab.id, "Please log in from the PageGenie popup first.");
+            }
+
+            // Generate quiz on backend
+            const url = new URL("/api/v1/quiz/generate", backendUrl).toString();
+            const res = await fetch(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${apiToken}`
+                },
+                body: JSON.stringify({ url: pageUrl }),
+                credentials: "omit"
+            });
+
+            if (res.status === 401) {
+                await chrome.storage.sync.set({ apiToken: "", tokenExp: 0 });
+                return toast(tab.id, "Unauthorized. Please log in again from the PageGenie popup.");
+            }
+            if (!res.ok) {
+                const t = await res.text().catch(() => "");
+                throw new Error(`Quiz generation failed ${res.status}: ${t || res.statusText}`);
+            }
+
+            const data = await res.json().catch(() => ({}));
+            const quizId = data.id;
+
+            if (!quizId) {
+                throw new Error("Backend did not return a quiz id.");
+            }
+
+            // Open extension's quiz UI (not backend /quiz/{id})
+            const extUrl = chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(quizId)}&src=${encodeURIComponent(pageUrl)}`);
+            await chrome.tabs.create({ url: extUrl });
+            toast(tab.id, "Quiz created. Opening...");
+        } catch (e) {
+            console.error("Quiz error", e);
+            toast(tab.id, e?.message || String(e));
+        }
+    }
 });
 
+// Centralized calls to backend used by content script (unchanged)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    // Centralized persistence/AI calls to Spring Boot backend
     if (msg?.type === "PAGEGENIE_PERSIST") {
         (async () => {
             try {
@@ -44,7 +116,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
                 if (!backendUrl) throw new Error("Backend URL not configured in Options.");
 
-                // Preempt expired token
                 const now = Date.now();
                 if (apiToken && tokenExp && now >= tokenExp) {
                     await chrome.storage.sync.set({ apiToken: "", tokenExp: 0 });
@@ -61,7 +132,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 });
 
                 if (res.status === 401) {
-                    // Clear token and notify caller
                     await chrome.storage.sync.set({ apiToken: "", tokenExp: 0 });
                     throw new Error("Unauthorized. Please log in again.");
                 }
@@ -77,18 +147,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 sendResponse({ ok: false, error: e?.message || String(e) });
             }
         })();
-        return true; // keep port open for async sendResponse
+        return true;
     }
 
-    // Handle login: POST to /api/v1/auth/login and read Authorization header
     if (msg?.type === "PAGEGENIE_AUTH_LOGIN") {
         (async () => {
             try {
                 const { username, password, path } = msg;
                 if (!username || !password) throw new Error("Username and password are required.");
                 const { backendUrl } = await chrome.storage.sync.get({ backendUrl: "http://localhost:8098" });
-                if (!backendUrl) throw new Error("Backend URL not configured in Options.");
-
                 const loginPath = path || "/api/v1/auth/login";
                 const url = new URL(loginPath, backendUrl).toString();
 
@@ -110,13 +177,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 }
 
                 const token = authHeader.slice(7).trim();
-                const expMs = getJwtExpMs(token) ?? (Date.now() + 15 * 60 * 1000); // fallback 15min
+                const expMs = getJwtExpMs(token) ?? (Date.now() + 15 * 60 * 1000);
 
-                await chrome.storage.sync.set({
-                    apiToken: token,
-                    tokenExp: expMs
-                });
-
+                await chrome.storage.sync.set({ apiToken: token, tokenExp: expMs });
                 sendResponse({ ok: true, token, exp: expMs });
             } catch (e) {
                 sendResponse({ ok: false, error: e?.message || String(e) });
@@ -135,7 +198,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // Helpers
-
+function toast(tabId, message) {
+    try {
+        chrome.tabs.sendMessage(tabId, { type: "PAGEGENIE_TOAST", message });
+    } catch (e) {
+        console.warn("Toast send failed", e);
+    }
+}
 function getJwtExpMs(token) {
     try {
         const parts = token.split(".");
@@ -147,7 +216,6 @@ function getJwtExpMs(token) {
         return null;
     }
 }
-
 function base64UrlToBase64(s) {
     s = s.replace(/-/g, "+").replace(/_/g, "/");
     const pad = s.length % 4;
