@@ -6,11 +6,11 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class UserMapper {
-    public User toUser(UserRequest userRequest){
+    public User toUser(UserRequest userRequest, String newPassword) {
         return User.builder()
                 .fullName(userRequest.fullName())
                 .username(userRequest.username())
-                .password(userRequest.password())
+                .password(newPassword)
                 .build();
     }
 
