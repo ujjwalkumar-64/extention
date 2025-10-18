@@ -41,29 +41,36 @@
     const nvl = (a, b) => (a == null ? b : a);
 
     // Normalize any API output to plain string
+    function cleanProofreadText(s) {
+        // Strip common debug prefixes the local API may add
+        return String(s || "").replace(/^\s*(PROOFREAD(?:_TEXT)?|CORRECTED(?:_TEXT)?)\s*:\s*/i, "").trim();
+    }
+
     function ensureText(out) {
         if (out == null) return "";
-        if (typeof out === "string") return out;
+        if (typeof out === "string") return cleanProofreadText(out);
 
         if (typeof out === "object") {
-            if (typeof out.text === "string") return out.text;
-            if (typeof out.correctedText === "string") return out.correctedText;
-            if (typeof out.result === "string") return out.result;
-            if (typeof out.output === "string") return out.output;
+            // Prefer the corrected fields first
+            if (typeof out.correctedText === "string") return cleanProofreadText(out.correctedText);
+            if (typeof out.correctedInput === "string") return cleanProofreadText(out.correctedInput);
+            if (typeof out.text === "string") return cleanProofreadText(out.text);
+            if (typeof out.result === "string") return cleanProofreadText(out.result);
+            if (typeof out.output === "string") return cleanProofreadText(out.output);
             if (Array.isArray(out.choices) && typeof out.choices[0]?.text === "string") {
-                return out.choices[0].text;
+                return cleanProofreadText(out.choices[0].text);
             }
             if (Array.isArray(out.candidates)) {
                 const parts = out.candidates[0]?.content?.parts;
                 if (Array.isArray(parts)) {
                     const s = parts.map(p => (typeof p?.text === "string" ? p.text : "")).join("\n").trim();
-                    if (s) return s;
+                    if (s) return cleanProofreadText(s);
                 }
             }
-            try { return JSON.stringify(out); } catch { return String(out); }
+            try { return cleanProofreadText(JSON.stringify(out)); } catch { return cleanProofreadText(String(out)); }
         }
 
-        return String(out);
+        return cleanProofreadText(String(out));
     }
 
     // --------------- Prompt API (fallback) ---------------
@@ -269,21 +276,23 @@
         const P = window.Proofreader;
         return !!(P && (isFn(P.create) || isFn(P.proofread)));
     }
+    // Replace your existing callProofreader with this version
     async function callProofreader(id, text) {
         const P = window.Proofreader;
         if (!P) throw new Error("Proofreader API not available");
         pingProgress(id, "Using Proofreader API");
-        if (isFn(P.proofread)) {
+
+        if (typeof P.proofread === "function") {
             const r = await withTimeout(P.proofread(text), 20000, "Proofreader timed out");
             return ensureText(r);
         }
-        if (isFn(P.create)) {
+        if (typeof P.create === "function") {
             const inst = await withTimeout(P.create({ monitor: mkMonitor(id) }), 30000, "Proofreader creation timed out");
-            if (isFn(inst.proofread)) {
+            if (typeof inst.proofread === "function") {
                 const r = await withTimeout(inst.proofread(text), 20000, "Proofreader timed out");
                 return ensureText(r);
             }
-            if (isFn(inst.generate)) {
+            if (typeof inst.generate === "function") {
                 const r = await withTimeout(inst.generate({ task: "proofread", text }), 20000, "Proofreader timed out");
                 return ensureText(r);
             }
@@ -448,6 +457,7 @@
                     break;
                 }
 
+                // In your main request handler's "proofread" case, ensure the Prompt fallback also cleans the text
                 case "proofread": {
                     let ok = false;
                     if (hasProofreader()) {
@@ -462,13 +472,12 @@
                     if (!ok) {
                         pingProgress(id, "Using Prompt API (proofread)");
                         const s = await getPromptSession();
-                        output = ensureText(
-                            await withTimeout(
-                                s.prompt(buildPrompt("proofread", text)),
-                                30000,
-                                "Prompt proofread timed out"
-                            )
+                        const r = await withTimeout(
+                            s.prompt(buildPrompt("proofread", text)),
+                            30000,
+                            "Prompt proofread timed out"
                         );
+                        output = ensureText(r);
                     }
                     break;
                 }
