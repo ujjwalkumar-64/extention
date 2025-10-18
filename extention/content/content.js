@@ -144,9 +144,11 @@
         if (!lastSelectionText) return;
         const loader = createLoadingToast("Preparing " + opTitle(op));
         try {
-            const result = await runAI(op, lastSelectionText, settings.targetLang, (stage) => {
+
+            const raw = await runAI(op, lastSelectionText, settings.targetLang, (stage) => {
                 loader.set(`${opTitle(op)} • ${stage}`);
             });
+            const result = toPlainText(raw);
             loader.success(opTitle(op) + " ready");
             showResultPanel(result);
             persist("/api/ops/log", {
@@ -166,9 +168,10 @@
         if (!lastRange || !lastSelectionText) return;
         const loader = createLoadingToast("Proofreading...");
         try {
-            const result = await runAI("proofread", lastSelectionText, settings.targetLang, (stage) => {
+            const raw = await runAI("proofread", lastSelectionText, settings.targetLang, (stage) => {
                 loader.set(`Proofreading • ${stage}`);
             });
+            const result = stripMarkdownCodeFences(toPlainText(raw)); // ensure string, then strip fences if any
             replaceRangeWithText(lastRange, result);
             loader.success("Replaced with proofread text");
             persist("/api/ops/log", {
@@ -188,9 +191,10 @@
         if (!lastRange || !lastSelectionText) return;
         const loader = createLoadingToast("Translating...");
         try {
-            const result = await runAI("translate", lastSelectionText, settings.targetLang, (stage) => {
+            const raw = await runAI("translate", lastSelectionText, settings.targetLang, (stage) => {
                 loader.set(`Translating • ${stage}`);
             });
+            const result = toPlainText(raw);
             loader.success("Translation ready");
             showTranslationBubble(lastRange, result);
             persist("/api/ops/log", {
@@ -215,10 +219,10 @@
 
         const loader = createLoadingToast("Adding explainer comments...");
         try {
-            const resultRaw = await runAI("comment_code", codeText, settings.targetLang, (stage) => {
+            const raw = await runAI("comment_code", codeText, settings.targetLang, (stage) => {
                 loader.set(`Adding comments • ${stage}`);
             });
-            const result = stripMarkdownCodeFences(resultRaw);
+            const result = stripMarkdownCodeFences(toPlainText(raw));
             setCodeText(codeEl, result);
             loader.success("Comments inserted");
             persist("/api/ops/log", {
@@ -486,6 +490,41 @@
             return s.replace(/^```[\w+-]*\s*\n?/, "").replace(/```$/, "");
         }
         return s;
+    }
+
+
+    function toPlainText(out) {
+        if (out == null) return "";
+        if (typeof out === "string") return out;
+
+        // Common shapes from task APIs or LLMs
+        if (typeof out === "object") {
+            if (typeof out.text === "string") return out.text;
+            if (typeof out.correctedText === "string") return out.correctedText;
+            if (typeof out.result === "string") return out.result;
+            if (typeof out.output === "string") return out.output;
+            if (Array.isArray(out.choices) && typeof out.choices[0]?.text === "string") {
+                return out.choices[0].text;
+            }
+            if (Array.isArray(out.candidates)) {
+                // Gemini-like { candidates: [{content:{parts:[{text:"..."}]}}] }
+                const parts = out.candidates[0]?.content?.parts;
+                if (Array.isArray(parts)) {
+                    const s = parts.map(p => typeof p?.text === "string" ? p.text : "").join("\n").trim();
+                    if (s) return s;
+                }
+            }
+            // Fallback: stringify, but try to avoid inserting JSON blobs into the page
+            try {
+                // If it looks like {text:"..."} but we missed a key above
+                const t = JSON.stringify(out);
+                return t;
+            } catch {
+                return String(out);
+            }
+        }
+
+        return String(out);
     }
 
     // Robust persist with invalidated-context and lastError handling

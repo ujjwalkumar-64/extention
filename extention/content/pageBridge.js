@@ -40,6 +40,32 @@
     const isFn = (f) => typeof f === "function";
     const nvl = (a, b) => (a == null ? b : a);
 
+    // Normalize any API output to plain string
+    function ensureText(out) {
+        if (out == null) return "";
+        if (typeof out === "string") return out;
+
+        if (typeof out === "object") {
+            if (typeof out.text === "string") return out.text;
+            if (typeof out.correctedText === "string") return out.correctedText;
+            if (typeof out.result === "string") return out.result;
+            if (typeof out.output === "string") return out.output;
+            if (Array.isArray(out.choices) && typeof out.choices[0]?.text === "string") {
+                return out.choices[0].text;
+            }
+            if (Array.isArray(out.candidates)) {
+                const parts = out.candidates[0]?.content?.parts;
+                if (Array.isArray(parts)) {
+                    const s = parts.map(p => (typeof p?.text === "string" ? p.text : "")).join("\n").trim();
+                    if (s) return s;
+                }
+            }
+            try { return JSON.stringify(out); } catch { return String(out); }
+        }
+
+        return String(out);
+    }
+
     // --------------- Prompt API (fallback) ---------------
 
     let promptSessionPromise = null;
@@ -56,23 +82,25 @@
 
         promptSessionPromise = (async () => {
             try {
-                if (isFn(window.ai.canCreateTextSession)) {
+                if (typeof window.ai.canCreateTextSession === "function") {
                     const status = await window.ai.canCreateTextSession();
                     if (status === "no") throw new Error("On-device AI not supported on this device");
-                    // "after-download": createTextSession will fetch the model; just await it.
                 }
-            } catch {}
-            const sess = await withTimeout(
-                window.ai.createTextSession({ temperature: 0.2 }),
-                30000,
-                "On-device model creation timed out"
-            );
-            if (!sess || !isFn(sess.prompt)) {
-                throw new Error("Prompt API session not available");
+                const sess = await withTimeout(
+                    window.ai.createTextSession({ temperature: 0.2 }),
+                    30000,
+                    "On-device model creation timed out"
+                );
+                if (!sess || typeof sess.prompt !== "function") {
+                    throw new Error("Prompt API session not available");
+                }
+                return sess;
+            } catch (e) {
+                // Allow retry on next call
+                promptSessionPromise = null;
+                throw e;
             }
-            return sess;
         })();
-
         return promptSessionPromise;
     }
 
@@ -104,30 +132,26 @@
         return !!(window.Translator && isFn(window.Translator.create));
     }
 
+    // Progress monitor: Translator verbose (1..100), others minimal (only 100%)
     function attachMonitor(id, m, opts = {}) {
         const verbose = !!opts.verbose; // true for Translator, false for others
         let lastPct = -1;
 
         function toPercent(e) {
-            // Support multiple event shapes
             const loaded = (e?.loaded ?? e?.detail?.loaded ?? e?.progress ?? null);
             const total  = (e?.total  ?? e?.detail?.total  ?? null);
 
             let ratio = null;
 
             if (typeof loaded === "number" && typeof total === "number" && total > 0) {
-                // Bytes case: use loaded/total
-                ratio = loaded / total;
+                ratio = loaded / total;              // bytes -> ratio
             } else if (typeof loaded === "number" && loaded >= 0 && loaded <= 1) {
-                // Ratio case: 0..1 directly
-                ratio = loaded;
+                ratio = loaded;                      // already ratio
             } else if (typeof e?.progress === "number" && e.progress >= 0 && e.progress <= 1) {
-                // Some UAs might expose `progress` already normalized
-                ratio = e.progress;
+                ratio = e.progress;                  // already ratio
             }
 
             if (ratio == null) return null;
-            // Monotonic integer steps 0..100
             return Math.max(0, Math.min(100, Math.floor(ratio * 100)));
         }
 
@@ -137,13 +161,11 @@
                 if (pct == null) return;
 
                 if (verbose) {
-                    // Emit 1,2,3,...,100 (only on change)
                     if (pct > lastPct) {
                         lastPct = pct;
                         pingProgress(id, `Downloading model ${pct}%`);
                     }
                 } else {
-                    // Minimal: only emit final 100%
                     if (pct >= 100 && lastPct < 100) {
                         lastPct = 100;
                         pingProgress(id, `Downloading model 100%`);
@@ -152,11 +174,9 @@
             });
 
             m.addEventListener("statechange", () => {
-                // For Translator we can forward state for extra transparency
                 if (verbose) {
                     pingProgress(id, `State: ${m?.state || "unknown"}`);
                 } else {
-                    // Minimal: ensure we at least show completion
                     const st = String(m?.state || "").toLowerCase();
                     if ((st === "installed" || st === "ready") && lastPct < 100) {
                         lastPct = 100;
@@ -173,7 +193,6 @@
         if (!hasTranslator()) throw new Error("Translator API not available");
         pingProgress(id, "Using Translator API");
 
-        // Try create with provided src/dst; if src is empty, try 'auto', then fallback to 'en'
         const tryCreate = async (src, dst) => {
             return await withTimeout(
                 window.Translator.create({
@@ -189,26 +208,23 @@
         let translator;
         const target = nvl(dstLang, "en");
 
-        // Attempt auto-detect first
         try {
             translator = await tryCreate(nvl(srcLang, "auto"), target);
         } catch (e1) {
-            // Fallback to explicit English source if auto-detect not supported
             try {
                 translator = await tryCreate("en", target);
             } catch (e2) {
-                // As a last resort, try passing only targetLanguage if the UA allows it
                 try {
                     translator = await withTimeout(
                         window.Translator.create({
                             targetLanguage: target,
-                            monitor: (m) => attachMonitor(id, m, { verbose: true }) // VERBOSE
+                            monitor: (m) => attachMonitor(id, m, { verbose: true })
                         }),
                         45000,
                         "Translator creation timed out"
                     );
                 } catch (e3) {
-                    throw e2; // propagate the more specific failure
+                    throw e2;
                 }
             }
         }
@@ -218,7 +234,7 @@
             30000,
             "Translator timed out"
         );
-        return String(out ?? "");
+        return ensureText(out);
     }
 
     // Summarizer API (best-effort shapes)
@@ -231,12 +247,19 @@
         if (!S) throw new Error("Summarizer API not available");
         pingProgress(id, "Using Summarizer API");
         if (isFn(S.summarize)) {
-            return String(await withTimeout(S.summarize(text), 20000, "Summarizer timed out"));
+            const r = await withTimeout(S.summarize(text), 20000, "Summarizer timed out");
+            return ensureText(r);
         }
         if (isFn(S.create)) {
             const inst = await withTimeout(S.create({ monitor: mkMonitor(id) }), 30000, "Summarizer creation timed out");
-            if (isFn(inst.summarize)) return String(await withTimeout(inst.summarize(text), 20000, "Summarizer timed out"));
-            if (isFn(inst.generate)) return String(await withTimeout(inst.generate({ task: "summarize", text }), 20000, "Summarizer timed out"));
+            if (isFn(inst.summarize)) {
+                const r = await withTimeout(inst.summarize(text), 20000, "Summarizer timed out");
+                return ensureText(r);
+            }
+            if (isFn(inst.generate)) {
+                const r = await withTimeout(inst.generate({ task: "summarize", text }), 20000, "Summarizer timed out");
+                return ensureText(r);
+            }
         }
         throw new Error("Summarizer API shape not supported");
     }
@@ -251,12 +274,19 @@
         if (!P) throw new Error("Proofreader API not available");
         pingProgress(id, "Using Proofreader API");
         if (isFn(P.proofread)) {
-            return String(await withTimeout(P.proofread(text), 20000, "Proofreader timed out"));
+            const r = await withTimeout(P.proofread(text), 20000, "Proofreader timed out");
+            return ensureText(r);
         }
         if (isFn(P.create)) {
             const inst = await withTimeout(P.create({ monitor: mkMonitor(id) }), 30000, "Proofreader creation timed out");
-            if (isFn(inst.proofread)) return String(await withTimeout(inst.proofread(text), 20000, "Proofreader timed out"));
-            if (isFn(inst.generate)) return String(await withTimeout(inst.generate({ task: "proofread", text }), 20000, "Proofreader timed out"));
+            if (isFn(inst.proofread)) {
+                const r = await withTimeout(inst.proofread(text), 20000, "Proofreader timed out");
+                return ensureText(r);
+            }
+            if (isFn(inst.generate)) {
+                const r = await withTimeout(inst.generate({ task: "proofread", text }), 20000, "Proofreader timed out");
+                return ensureText(r);
+            }
         }
         throw new Error("Proofreader API shape not supported");
     }
@@ -271,12 +301,19 @@
         if (!R) throw new Error("Rewriter API not available");
         pingProgress(id, "Using Rewriter API");
         if (isFn(R.rewrite)) {
-            return String(await withTimeout(R.rewrite(text), 20000, "Rewriter timed out"));
+            const r = await withTimeout(R.rewrite(text), 20000, "Rewriter timed out");
+            return ensureText(r);
         }
         if (isFn(R.create)) {
             const inst = await withTimeout(R.create({ monitor: mkMonitor(id) }), 30000, "Rewriter creation timed out");
-            if (isFn(inst.rewrite)) return String(await withTimeout(inst.rewrite(text), 20000, "Rewriter timed out"));
-            if (isFn(inst.generate)) return String(await withTimeout(inst.generate({ task: "rewrite", text }), 20000, "Rewriter timed out"));
+            if (isFn(inst.rewrite)) {
+                const r = await withTimeout(inst.rewrite(text), 20000, "Rewriter timed out");
+                return ensureText(r);
+            }
+            if (isFn(inst.generate)) {
+                const r = await withTimeout(inst.generate({ task: "rewrite", text }), 20000, "Rewriter timed out");
+                return ensureText(r);
+            }
         }
         throw new Error("Rewriter API shape not supported");
     }
@@ -291,12 +328,19 @@
         if (!W) throw new Error("Writer API not available");
         pingProgress(id, "Using Writer API (explain)");
         if (isFn(W.write)) {
-            return String(await withTimeout(W.write({ instruction: "Explain clearly for a general audience.", text }), 20000, "Writer timed out"));
+            const r = await withTimeout(W.write({ instruction: "Explain clearly for a general audience.", text }), 20000, "Writer timed out");
+            return ensureText(r);
         }
         if (isFn(W.create)) {
             const inst = await withTimeout(W.create({ monitor: mkMonitor(id) }), 30000, "Writer creation timed out");
-            if (isFn(inst.write)) return String(await withTimeout(inst.write({ instruction: "Explain clearly for a general audience.", text }), 20000, "Writer timed out"));
-            if (isFn(inst.generate)) return String(await withTimeout(inst.generate({ task: "explain", text }), 20000, "Writer timed out"));
+            if (isFn(inst.write)) {
+                const r = await withTimeout(inst.write({ instruction: "Explain clearly for a general audience.", text }), 20000, "Writer timed out");
+                return ensureText(r);
+            }
+            if (isFn(inst.generate)) {
+                const r = await withTimeout(inst.generate({ task: "explain", text }), 20000, "Writer timed out");
+                return ensureText(r);
+            }
         }
         throw new Error("Writer API shape not supported");
     }
@@ -306,12 +350,19 @@
         if (!W) throw new Error("Writer API not available");
         pingProgress(id, "Using Writer API (generic)");
         if (isFn(W.write)) {
-            return String(await withTimeout(W.write({ instruction: "Process the text and return the best possible result.", text }), 20000, "Writer timed out"));
+            const r = await withTimeout(W.write({ instruction: "Process the text and return the best possible result.", text }), 20000, "Writer timed out");
+            return ensureText(r);
         }
         if (isFn(W.create)) {
             const inst = await withTimeout(W.create({ monitor: mkMonitor(id) }), 30000, "Writer creation timed out");
-            if (isFn(inst.write)) return String(await withTimeout(inst.write({ instruction: "Process the text and return the best possible result.", text }), 20000, "Writer timed out"));
-            if (isFn(inst.generate)) return String(await withTimeout(inst.generate({ task: "generic", text }), 20000, "Writer timed out"));
+            if (isFn(inst.write)) {
+                const r = await withTimeout(inst.write({ instruction: "Process the text and return the best possible result.", text }), 20000, "Writer timed out");
+                return ensureText(r);
+            }
+            if (isFn(inst.generate)) {
+                const r = await withTimeout(inst.generate({ task: "generic", text }), 20000, "Writer timed out");
+                return ensureText(r);
+            }
         }
         throw new Error("Writer API shape not supported");
     }
@@ -363,19 +414,20 @@
                     try {
                         output = await callTranslator(id, text, /*src*/undefined, nvl(targetLang, "en"));
                     } catch {
-                        // Prompt fallback
                         pingProgress(id, "Using Prompt API (translate)");
                         const s = await getPromptSession();
-                        output = await withTimeout(
-                            s.prompt(buildPrompt("translate", text, targetLang)),
-                            30000,
-                            "Prompt translate timed out"
+                        output = ensureText(
+                            await withTimeout(
+                                s.prompt(buildPrompt("translate", text, targetLang)),
+                                30000,
+                                "Prompt translate timed out"
+                            )
                         );
                     }
                     break;
                 }
+
                 case "summarize": {
-                    // Prefer Summarizer, then Prompt
                     try {
                         if (hasSummarizer()) {
                             output = await callSummarizer(id, text);
@@ -385,16 +437,18 @@
                     } catch {
                         pingProgress(id, "Using Prompt API (summarize)");
                         const s = await getPromptSession();
-                        output = await withTimeout(
-                            s.prompt(buildPrompt("summarize", text)),
-                            30000,
-                            "Prompt summarize timed out"
+                        output = ensureText(
+                            await withTimeout(
+                                s.prompt(buildPrompt("summarize", text)),
+                                30000,
+                                "Prompt summarize timed out"
+                            )
                         );
                     }
                     break;
                 }
+
                 case "proofread": {
-                    // Prefer Proofreader, then Rewriter/Writer, then Prompt
                     let ok = false;
                     if (hasProofreader()) {
                         try { output = await callProofreader(id, text); ok = true; } catch {}
@@ -408,16 +462,18 @@
                     if (!ok) {
                         pingProgress(id, "Using Prompt API (proofread)");
                         const s = await getPromptSession();
-                        output = await withTimeout(
-                            s.prompt(buildPrompt("proofread", text)),
-                            30000,
-                            "Prompt proofread timed out"
+                        output = ensureText(
+                            await withTimeout(
+                                s.prompt(buildPrompt("proofread", text)),
+                                30000,
+                                "Prompt proofread timed out"
+                            )
                         );
                     }
                     break;
                 }
+
                 case "rewrite": {
-                    // Prefer Rewriter, then Writer, then Prompt
                     try {
                         if (hasRewriter()) {
                             output = await callRewriter(id, text);
@@ -425,13 +481,19 @@
                             pingProgress(id, "Using Writer API (rewrite)");
                             const W = window.Writer;
                             if (isFn(W?.write)) {
-                                output = String(await withTimeout(W.write({ instruction: "Rewrite to improve clarity and flow without changing meaning.", text }), 20000, "Writer timed out"));
+                                output = ensureText(
+                                    await withTimeout(W.write({ instruction: "Rewrite to improve clarity and flow without changing meaning.", text }), 20000, "Writer timed out")
+                                );
                             } else if (isFn(W?.create)) {
                                 const inst = await withTimeout(W.create({ monitor: mkMonitor(id) }), 30000, "Writer creation timed out");
                                 if (isFn(inst.write)) {
-                                    output = String(await withTimeout(inst.write({ instruction: "Rewrite to improve clarity and flow without changing meaning.", text }), 20000, "Writer timed out"));
+                                    output = ensureText(
+                                        await withTimeout(inst.write({ instruction: "Rewrite to improve clarity and flow without changing meaning.", text }), 20000, "Writer timed out")
+                                    );
                                 } else if (isFn(inst.generate)) {
-                                    output = String(await withTimeout(inst.generate({ task: "rewrite", text }), 20000, "Writer timed out"));
+                                    output = ensureText(
+                                        await withTimeout(inst.generate({ task: "rewrite", text }), 20000, "Writer timed out")
+                                    );
                                 } else {
                                     throw new Error("Writer shape not supported");
                                 }
@@ -444,16 +506,18 @@
                     } catch {
                         pingProgress(id, "Using Prompt API (rewrite)");
                         const s = await getPromptSession();
-                        output = await withTimeout(
-                            s.prompt(buildPrompt("rewrite", text)),
-                            30000,
-                            "Prompt rewrite timed out"
+                        output = ensureText(
+                            await withTimeout(
+                                s.prompt(buildPrompt("rewrite", text)),
+                                30000,
+                                "Prompt rewrite timed out"
+                            )
                         );
                     }
                     break;
                 }
+
                 case "explain": {
-                    // Prefer Writer (explain), then Prompt
                     try {
                         if (hasWriter()) {
                             output = await callWriterExplain(id, text);
@@ -463,27 +527,31 @@
                     } catch {
                         pingProgress(id, "Using Prompt API (explain)");
                         const s = await getPromptSession();
-                        output = await withTimeout(
-                            s.prompt(buildPrompt("explain", text)),
-                            30000,
-                            "Prompt explain timed out"
+                        output = ensureText(
+                            await withTimeout(
+                                s.prompt(buildPrompt("explain", text)),
+                                30000,
+                                "Prompt explain timed out"
+                            )
                         );
                     }
                     break;
                 }
+
                 case "comment_code": {
-                    // Prompt only (no known task API)
                     pingProgress(id, "Using Prompt API (comment code)");
                     const s = await getPromptSession();
-                    output = await withTimeout(
-                        s.prompt(buildPrompt("comment_code", text)),
-                        30000,
-                        "Prompt comment_code timed out"
+                    output = ensureText(
+                        await withTimeout(
+                            s.prompt(buildPrompt("comment_code", text)),
+                            30000,
+                            "Prompt comment_code timed out"
+                        )
                     );
                     break;
                 }
+
                 default: {
-                    // Unknown op: try Writer generic, then Prompt generic
                     let ok = false;
                     if (hasWriter()) {
                         try { output = await callWriterGeneric(id, text); ok = true; } catch {}
@@ -491,17 +559,19 @@
                     if (!ok) {
                         pingProgress(id, "Using Prompt API (generic)");
                         const s = await getPromptSession();
-                        output = await withTimeout(
-                            s.prompt(buildPrompt("generic", text)),
-                            30000,
-                            "Prompt generic timed out"
+                        output = ensureText(
+                            await withTimeout(
+                                s.prompt(buildPrompt("generic", text)),
+                                30000,
+                                "Prompt generic timed out"
+                            )
                         );
                     }
                 }
             }
 
             response.ok = true;
-            response.result = String(output ?? "");
+            response.result = ensureText(output);
         } catch (e) {
             response.ok = false;
             response.error = e?.message || String(e);
