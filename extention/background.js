@@ -20,7 +20,7 @@ function setupContextMenus() {
         chrome.contextMenus.create({
             id: "pagegenie-quiz-page",
             title: "PageGenie: Quiz Me (Entire Page)",
-            contexts: ["page"]
+            contexts: ["page","selection"]
         });
     });
 }
@@ -44,6 +44,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
     // Quiz action
     if (info.menuItemId === "pagegenie-quiz-page") {
+        const requestId = "quiz_" + Date.now() + "_" + Math.random().toString(36).slice(2);
+
+        // Start loader on the current tab
+        chrome.tabs.sendMessage(tab.id, {
+            type: "PAGEGENIE_LOADING",
+            action: "start",
+            requestId,
+            message: "Generating quiz from this page…"
+        });
+
         try {
             const pageUrl = tab.url || info.pageUrl;
             if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) {
@@ -62,6 +72,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
             if (!apiToken) {
                 return toast(tab.id, "Please log in from the PageGenie popup first.");
             }
+            // Update loader: we are calling cloud AI
+            chrome.tabs.sendMessage(tab.id, {
+                type: "PAGEGENIE_LOADING",
+                action: "set",
+                requestId,
+                message: "Using cloud AI to generate quiz…"
+            });
 
             // Generate quiz on backend
             const url = new URL("/api/v1/quiz/generate", backendUrl).toString();
@@ -90,17 +107,31 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
             if (!quizId) {
                 throw new Error("Backend did not return a quiz id.");
             }
+            // Success: update loader
+            chrome.tabs.sendMessage(tab.id, {
+                type: "PAGEGENIE_LOADING",
+                action: "success",
+                requestId,
+                message: "Quiz ready"
+            });
+
 
             // Open extension's quiz UI (not backend /quiz/{id})
             const extUrl = chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(quizId)}&src=${encodeURIComponent(pageUrl)}`);
             await chrome.tabs.create({ url: extUrl });
-            toast(tab.id, "Quiz created. Opening...");
+
         } catch (e) {
-            console.error("Quiz error", e);
-            toast(tab.id, e?.message || String(e));
+            chrome.tabs.sendMessage(tab.id, {
+                type: "PAGEGENIE_LOADING",
+                action: "error",
+                requestId,
+                message: e?.message || String(e)
+            });
         }
     }
 });
+
+
 
 // Centralized calls to backend used by content script (unchanged)
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -141,6 +172,95 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     throw new Error(`Backend error ${res.status}: ${text || res.statusText}`);
                 }
 
+                const data = await res.json().catch(() => ({}));
+                sendResponse({ ok: true, data });
+            } catch (e) {
+                sendResponse({ ok: false, error: e?.message || String(e) });
+            }
+        })();
+        return true;
+    }
+    if (msg?.type === "PAGEGENIE_OPEN_QUIZ") {
+        try {
+            const quizId = msg.quizId;
+            if (!quizId) throw new Error("quizId missing");
+            const url = chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(quizId)}`);
+            chrome.tabs.create({ url });
+            sendResponse?.({ ok: true });
+        } catch (e) {
+            sendResponse?.({ ok: false, error: e?.message || String(e) });
+        }
+        return true;
+    }
+
+        if (msg?.type === "PAGEGENIE_AUTH_SIGNUP") {
+            (async () => {
+                try {
+                    const { username, password, fullName, path } = msg;
+                    if (!username || !password || !fullName) throw new Error("Full name, username and password are required.");
+                    const { backendUrl } = await chrome.storage.sync.get({ backendUrl: "http://localhost:8098" });
+                    if (!backendUrl) throw new Error("Backend URL not configured in Options.");
+                    const url = new URL(path || "/api/v1/auth/signup", backendUrl).toString();
+
+                    const res = await fetch(url, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ username, password, fullName }),
+                        credentials: "omit"
+                    });
+
+                    if (!res.ok && res.status !== 201) {
+                        const body = await res.text().catch(() => "");
+                        throw new Error(`Signup failed (${res.status}): ${body || res.statusText}`);
+                    }
+
+                    // Optional: some backends may return an Authorization header on signup
+                    const authHeader = res.headers.get("Authorization") || res.headers.get("authorization");
+                    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+                        const token = authHeader.slice(7).trim();
+                        const expMs = getJwtExpMs(token) ?? (Date.now() + 15 * 60 * 1000);
+                        await chrome.storage.sync.set({ apiToken: token, tokenExp: expMs });
+                    }
+
+                    sendResponse({ ok: true });
+                } catch (e) {
+                    sendResponse({ ok: false, error: e?.message || String(e) });
+                }
+            })();
+            return true;
+        }
+
+    if (msg?.type === "PAGEGENIE_COMPARE_CONCEPT") {
+        (async () => {
+            try {
+                const { selectionText, pageUrl } = msg;
+                if (!selectionText) throw new Error("No selection text provided.");
+                const { backendUrl, apiToken } = await chrome.storage.sync.get({
+                    backendUrl: "http://localhost:8098",
+                    apiToken: ""
+                });
+                if (!backendUrl) throw new Error("Backend URL not configured in Options.");
+                if (!apiToken) throw new Error("Please log in from the PageGenie popup.");
+
+                const url = new URL("/api/v1/ai/compare-concept", backendUrl).toString();
+                const res = await fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${apiToken}`
+                    },
+                    body: JSON.stringify({ selection_text: selectionText, page_url: pageUrl }),
+                    credentials: "omit"
+                });
+
+                if (res.status === 401) {
+                    await chrome.storage.sync.set({ apiToken: "", tokenExp: 0 });
+                    throw new Error("Unauthorized. Please log in again.");
+                }
+                if (!res.ok) {
+                    const t = await res.text().catch(() => "");
+                    throw new Error(`Compare failed ${res.status}: ${t || res.statusText}`);
+                }
                 const data = await res.json().catch(() => ({}));
                 sendResponse({ ok: true, data });
             } catch (e) {
@@ -196,6 +316,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return true;
     }
 });
+
+
+
 
 // Helpers
 function toast(tabId, message) {

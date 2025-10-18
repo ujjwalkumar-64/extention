@@ -3,6 +3,8 @@ package com.extention.backend.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 
@@ -24,8 +26,9 @@ public class Suggestion {
     @Column(length = 512)
     private String title;
 
-    // Reason from AI: "Read this next because ..."
-    @Lob
+    // Large reason text → map to TEXT to avoid streaming LOB
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(columnDefinition = "TEXT")
     private String reason;
 
     @CreationTimestamp

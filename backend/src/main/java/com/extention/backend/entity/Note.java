@@ -3,6 +3,9 @@ package com.extention.backend.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.annotations.UpdateTimestamp;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 
@@ -23,14 +26,18 @@ public class Note {
     @Column(length = 1024)
     private String sourceUrl;
 
-    @Lob
-    @Column(nullable = false)
-    private String content; // selected text
+    // Original selected text; keep it moderate length or TEXT if needed
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR) // maps to TEXT, avoids LOB stream
+    @Column(columnDefinition = "TEXT")
+    private String content;
 
-    // JSON string: {"topic":"..","relatedTo":[".."],"tags":[".."],"summary":".."}
-    @Lob
+    // Categories JSON from AI
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR) // maps to TEXT, avoids LOB stream
+    @Column(columnDefinition = "TEXT")
     private String categoriesJson;
-
     @CreationTimestamp
     private Instant createdAt;
+
+    @UpdateTimestamp
+    private Instant updatedAt;
 }

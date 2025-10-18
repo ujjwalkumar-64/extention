@@ -5,6 +5,8 @@ package com.extention.backend.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 
@@ -23,12 +25,9 @@ import java.time.Instant;
 @AllArgsConstructor
 @Builder
 public class OperationLog {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Owner (authenticated principal if present; else "anonymousUser")
     @Column(nullable = false, length = 191)
     private String username;
 
@@ -36,23 +35,26 @@ public class OperationLog {
     private String sourceUrl;
 
     @Column(length = 64)
-    private String opType; // e.g., summarize, explain, translate, quick_proofread_replace
+    private String opType;
 
     @Column(length = 16)
-    private String targetLang; // e.g., en, fr
+    private String targetLang;
 
-    @Lob
-    private String inputPreview; // first ~500 chars
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(columnDefinition = "TEXT")
+    private String inputPreview;
 
     private Integer inputLength;
 
-    @Lob
-    private String outputPreview; // first ~500 chars
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(columnDefinition = "TEXT")
+    private String outputPreview;
 
     private Integer outputLength;
 
-    // Store the full payload as JSON text for audit/debugging (TEXT for portability)
-    @Lob
+    // Full raw payload JSON as TEXT (not LOB)
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(columnDefinition = "TEXT")
     private String rawPayloadJson;
 
     @CreationTimestamp

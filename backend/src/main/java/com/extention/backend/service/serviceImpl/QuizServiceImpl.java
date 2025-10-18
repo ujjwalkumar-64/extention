@@ -1,12 +1,12 @@
 package com.extention.backend.service.serviceImpl;
 
-
 import com.extention.backend.entity.Quiz;
 import com.extention.backend.entity.QuizAttempt;
 import com.extention.backend.mapper.ContentExtractor;
 import com.extention.backend.repository.QuizAttemptRepository;
 import com.extention.backend.repository.QuizRepository;
 import com.extention.backend.service.AiService;
+import com.extention.backend.utils.AuthUserUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -17,9 +17,12 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @RequiredArgsConstructor
 public class QuizServiceImpl {
+
     private final ContentExtractor extractor;
+
     @Qualifier("aiServiceImpl")
     private final AiService ai;
+
     private final QuizRepository quizRepository;
     private final QuizAttemptRepository attemptRepository;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -35,6 +38,26 @@ public class QuizServiceImpl {
                 .questionsJson(json)
                 .build();
         return quizRepository.save(quiz);
+    }
+
+    @Transactional
+    public Long generateFromText(String text, String title, String sourceUrl) {
+        if (text == null || text.isBlank()) {
+            throw new IllegalArgumentException("text is required");
+        }
+        String username = AuthUserUtil.requireUsername();
+
+        // IMPORTANT: Reuse the same pipeline as generateFromUrl to ensure identical JSON shape
+        String questionsJson = ai.generateQuizJson(safeTitle(title), safeSlice(text, 5000));
+
+        Quiz quiz = Quiz.builder()
+                .username(username)
+                .sourceUrl(sourceUrl)
+                .articleTitle(safeTitle(title))
+                .questionsJson(questionsJson)
+                .build();
+        quiz = quizRepository.save(quiz);
+        return quiz.getId();
     }
 
     public JsonNode getQuizQuestions(long quizId, String username) {
@@ -58,7 +81,7 @@ public class QuizServiceImpl {
             int correct = 0;
             int[] correctIdx = new int[arr.size()];
             for (int i = 0; i < arr.size(); i++) {
-                int idx = arr.get(i).path("correctIndex").asInt(-1);
+                int idx = arr.get(i).path("correctIndex").asInt(-1); // relies on AiService JSON shape
                 correctIdx[i] = idx;
                 if (i < answers.length && answers[i] == idx) correct++;
             }
@@ -78,5 +101,16 @@ public class QuizServiceImpl {
         } catch (Exception e) {
             throw new RuntimeException("Failed to grade quiz: " + e.getMessage(), e);
         }
+    }
+
+    private String safeSlice(String s, int max) {
+        if (s == null) return "";
+        String t = s.trim();
+        return t.length() > max ? t.substring(0, max) + "…" : t;
+    }
+
+    private String safeTitle(String t) {
+        String title = (t == null || t.isBlank()) ? "Quick Quiz (Selection)" : t.trim();
+        return title.length() > 200 ? title.substring(0, 200) : title;
     }
 }

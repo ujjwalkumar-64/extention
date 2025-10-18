@@ -9,4 +9,5 @@ import java.util.List;
 
 public interface SuggestionRepository extends JpaRepository<Suggestion, Long> {
     List<Suggestion> findTop10ByUsernameOrderByCreatedAtDesc(String username);
+    List<Suggestion> findTop2ByUsernameOrderByCreatedAtDesc(String username);
 }

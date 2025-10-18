@@ -9,6 +9,7 @@
     // Inject the page-bridge to access on-device AI APIs from page context (window.ai / Prompt API)
     injectPageBridge();
 
+
     // Settings state
     let settings = {
         mode: "auto", // "auto" | "offline-only" | "online-only"
@@ -33,7 +34,9 @@
     const toolbar = createToolbar();
     let lastSelectionText = "";
     let lastRange = null;
-    let lastAnchorPos = null; // fallback anchor for bubbles if selection collapses
+    let lastAnchorPos = null;
+    let lastAnchorPosViewport = null;
+    const __pg_loaders = new Map();
 
     document.addEventListener("selectionchange", () => {
         if (!settings.showToolbarOnSelection) {
@@ -41,20 +44,21 @@
             return;
         }
         const selection = document.getSelection();
-        if (!selection || selection.isCollapsed) {
-            toolbar.hide();
-            return;
-        }
+        if (!selection || selection.isCollapsed) { toolbar.hide(); return; }
         const text = selection.toString().trim();
-        if (!text) {
-            toolbar.hide();
-            return;
-        }
+        if (!text) { toolbar.hide(); return; }
+
         lastSelectionText = text;
         lastRange = selection.getRangeAt(0).cloneRange();
-        const rect = getRangeRect(lastRange);
-        toolbar.show(rect);
-        lastAnchorPos = { top: rect.top, left: rect.left };
+
+        // Absolute coords for toolbar
+        const rectPage = getRangeRect(lastRange);           // page coords (with scroll) — keeps your toolbar as-is
+        toolbar.show(rectPage);
+        lastAnchorPos = { top: rectPage.top, left: rectPage.left };
+
+        // Viewport coords for bubbles
+        const rectViewport = getViewportRect(lastRange);    // NEW
+        lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
     });
 
     document.addEventListener("mouseup", () => {
@@ -77,7 +81,34 @@
         if (msg?.type === "PAGEGENIE_TOAST" && msg.message) {
             showToast(msg.message);
         }
+        if (msg?.type !== "PAGEGENIE_LOADING") return;
+
+        const id = msg.requestId || "default";
+        if (msg.action === "start") {
+            // If a loader with same id exists, close it first
+            try { __pg_loaders.get(id)?.close?.(); } catch {}
+            const loader = createLoadingToast(msg.message || "Working…");
+            __pg_loaders.set(id, loader);
+            return;
+        }
+
+        const loader = __pg_loaders.get(id);
+        if (!loader) return;
+
+        if (msg.action === "set") {
+            loader.set(msg.message || "Working…");
+        } else if (msg.action === "success") {
+            loader.success(msg.message || "Done");
+            __pg_loaders.delete(id);
+        } else if (msg.action === "error") {
+            loader.error(msg.message || "Error");
+            __pg_loaders.delete(id);
+        } else if (msg.action === "close") {
+            loader.close();
+            __pg_loaders.delete(id);
+        }
     });
+
 
     // Toolbar actions
     toolbar.on("summarize", () => runSimpleOp("summarize"));
@@ -85,17 +116,23 @@
     toolbar.on("rewrite", () => runSimpleOp("rewrite"));
     toolbar.on("translate", () => runTranslationOverlay());
     toolbar.on("save", () => saveNote());
+    toolbar.on("compare_concept", () => compareConceptDrift());
+    toolbar.on("quiz_selection", () => quizSelectedText());
     // Quick-Fix DOM Injection actions
     toolbar.on("quick_proof", () => replaceWithProofread());
     toolbar.on("quick_overlay", () => runTranslationOverlay());
     toolbar.on("quick_comment", () => insertCodeComments());
 
+
     // Simple result operations (non-injection)
     async function runSimpleOp(op) {
         if (!lastSelectionText) return;
+        const loader = createLoadingToast("Preparing " + opTitle(op));
         try {
-            const result = await runAI(op, lastSelectionText, settings.targetLang);
-            showToast(opTitle(op) + " ready");
+            const result = await runAI(op, lastSelectionText, settings.targetLang, (stage) => {
+                loader.set(`${opTitle(op)} • ${stage}`);
+            });
+            loader.success(opTitle(op) + " ready");
             showResultPanel(result);
             // Persist op log (optional)
             persist("/api/ops/log", {
@@ -106,17 +143,20 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + (e?.message || e));
+            loader.error("AI error: " + (e?.message || e));
         }
     }
 
     // Quick-Fix: Replace selection with proofread text
     async function replaceWithProofread() {
         if (!lastRange || !lastSelectionText) return;
+        const loader = createLoadingToast("Proofreading...");
         try {
-            const result = await runAI("proofread", lastSelectionText, settings.targetLang);
+            const result = await runAI("proofread", lastSelectionText, settings.targetLang, (stage) => {
+                loader.set(`Proofreading • ${stage}`);
+            });
             replaceRangeWithText(lastRange, result);
-            showToast("Replaced with proofread text");
+            loader.success("Replaced with proofread text");
             persist("/api/ops/log", {
                 type: "quick_proofread_replace",
                 source: location.href,
@@ -125,17 +165,20 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + (e?.message || e));
+            loader.error("AI error: " + (e?.message || e));
         }
     }
 
     // Quick-Fix: Translation overlay bubble
     async function runTranslationOverlay() {
         if (!lastRange || !lastSelectionText) return;
+        const loader = createLoadingToast("Translating...");
         try {
-            const result = await runAI("translate", lastSelectionText, settings.targetLang);
+            const result = await runAI("translate", lastSelectionText, settings.targetLang, (stage) => {
+                loader.set(`Translating • ${stage}`);
+            });
+            loader.success("Translation ready");
             showTranslationBubble(lastRange, result);
-            showToast("Translation shown");
             persist("/api/ops/log", {
                 type: "translation_overlay",
                 source: location.href,
@@ -145,7 +188,7 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + (e?.message || e));
+            loader.error("AI error: " + (e?.message || e));
         }
     }
 
@@ -161,11 +204,15 @@
             showToast("Empty code block");
             return;
         }
+
+        const loader = createLoadingToast("Adding explainer comments...");
         try {
-            const resultRaw = await runAI("comment_code", codeText, settings.targetLang);
+            const resultRaw = await runAI("comment_code", codeText, settings.targetLang, (stage) => {
+                loader.set(`Adding comments • ${stage}`);
+            });
             const result = stripMarkdownCodeFences(resultRaw);
             setCodeText(codeEl, result);
-            showToast("Inserted explainer comments");
+            loader.success("Comments inserted");
             persist("/api/ops/log", {
                 type: "code_comment_injection",
                 source: location.href,
@@ -174,65 +221,149 @@
                 ts: Date.now()
             });
         } catch (e) {
-            showToast("AI error: " + (e?.message || e));
+            loader.error("AI error: " + (e?.message || e));
         }
     }
 
     // Save note: persist to backend, show categories bubble, then curated reading panel
     async function saveNote() {
         if (!lastSelectionText) return;
-        const payload = {
-            source: location.href,
-            content: lastSelectionText,
-            ts: Date.now()
-        };
+        const loader = createLoadingToast("Saving note...");
+        try {
+            const payload = { source: location.href, content: lastSelectionText, ts: Date.now() };
+            const res = await persist("/api/notes", payload);
+            if (!res?.ok) throw new Error(res?.error || "Save failed");
 
-        const res = await persist("/api/notes", payload);
+            const categories = safeParseJson(res.data?.categoriesJson);
+            showCategoriesBubbleWithFallback(categories);
+            loader.set("Fetching curated suggestions…");
 
-        if (!res?.ok) {
-            showToast(res?.error ? `Save failed: ${res.error}` : "Save failed");
-            if (String(res?.error || "").toLowerCase().includes("extension context invalidated")) {
-                showToast("Extension reloaded. Refresh this page and try again.");
+            // optional: fetch suggestions under same loader
+            try {
+                const suggestResp = await persist("/api/v1/reading/suggest", {
+                    baseUrl: location.href,
+                    baseSummary: categories?.summary || lastSelectionText.slice(0, 400)
+                });
+                if (suggestResp?.ok) {
+                    const suggestions = normalizeSuggestionsShape(suggestResp.data);
+                    if (suggestions.length) showSuggestionsPanel(suggestions);
+                }
+            } catch {}
+
+            loader.success("Note saved");
+        } catch (e) {
+            loader.error(e?.message || String(e));
+        }
+    }
+
+    // Implement the new function anywhere below your other handlers:
+        async function compareConceptDrift() {
+            if (!lastSelectionText) return;
+            const loader = createLoadingToast("Analyzing against your notes…");
+            try {
+                const resp = await sendCompareConcept(lastSelectionText, location.href);
+                if (!resp?.ok) throw new Error(resp?.error || "Compare failed");
+                const data = resp.data || {};
+                loader.success("Analysis ready");
+                showComparePanel({
+                    keyClaim: data.key_claim || data.keyClaim || "",
+                    agreement: data.agreement || "",
+                    drift: data.drift_analysis || data.drift || ""
+                });
+                persist("/api/ops/log", {
+                    type: "analyze_concept_drift",
+                    source: location.href,
+                    input: lastSelectionText,
+                    output: JSON.stringify(data),
+                    ts: Date.now()
+                });
+            } catch (e) {
+                loader.error(e?.message || e);
             }
-            return;
         }
 
-        showToast("Note saved");
-
-        // 1) Parse and show categories (topic/tags/related/summary)
-        const categories = safeParseJson(res.data?.categoriesJson);
-        try {
-            showCategoriesBubbleWithFallback(categories);
-        } catch {}
-
-        // 2) Curated Reading List (optional; requires auth if backend protects it)
-        try {
-            const suggestResp = await persist("/api/v1/reading/suggest", {
-                baseUrl: location.href,
-                baseSummary: categories?.summary || lastSelectionText.slice(0, 400)
-            });
-            if (suggestResp?.ok) {
-                const suggestions = normalizeSuggestionsShape(suggestResp.data);
-                if (suggestions.length) showSuggestionsPanel(suggestions);
+    function sendCompareConcept(selectionText, pageUrl) {
+        return new Promise((resolve) => {
+            if (!chrome?.runtime?.id) {
+                return resolve({ ok: false, error: "Extension context invalidated. Refresh page and try again." });
             }
-        } catch {}
+            chrome.runtime.sendMessage(
+                { type: "PAGEGENIE_COMPARE_CONCEPT", selectionText, pageUrl },
+                (resp) => {
+                    if (chrome.runtime.lastError) {
+                        return resolve({ ok: false, error: chrome.runtime.lastError.message || "Message failed" });
+                    }
+                    resolve(resp);
+                }
+            );
+        });
+    }
+
+    async function quizSelectedText() {
+        if (!lastSelectionText) {
+            showToast("Select some text to quiz");
+            return;
+        }
+        const loader = createLoadingToast("Generating quiz from selection…");
+        try {
+            loader.set("Using cloud AI to generate quiz");
+            // Keep payload simple; backend will handle prompt and storage
+            const resp = await persist("/api/v1/quiz/generate-from-text", {
+                text: lastSelectionText,
+                sourceUrl: location.href,
+                title: document.title?.slice(0, 120) || "Selection"
+            });
+            if (!resp?.ok) throw new Error(resp?.error || "Quiz generation failed");
+            const data = resp.data || {};
+            const quizId = data.id ?? data.quizId ?? data?.data?.id ?? data?.data?.quizId;
+            if (!quizId) throw new Error("Quiz ID missing in response");
+
+            // Success
+            loader.success("Quiz ready");
+
+            // Ask background to open quiz tab (safer than window.open from page)
+            chrome.runtime.sendMessage({ type: "PAGEGENIE_OPEN_QUIZ", quizId }, () => {
+                if (chrome.runtime.lastError) {
+                    // Fallback: try opening directly
+                    try {
+                        window.open(chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(quizId)}`), "_blank");
+                    } catch {}
+                }
+            });
+
+            // Log operation (optional)
+            persist("/api/ops/log", {
+                type: "quiz_from_selection",
+                source: location.href,
+                input: lastSelectionText,
+                output: String(quizId),
+                ts: Date.now()
+            });
+        } catch (e) {
+            loader.error(e?.message || String(e));
+        }
     }
 
     // AI routing: offline → online (or per settings)
-    async function runAI(op, text, targetLang) {
+    async function runAI(op, text, targetLang, progressCb) {
+        // Safe fallback if no progress callback was provided
+        const onProgress = (typeof progressCb === "function") ? progressCb : () => {};
+
         const tryOffline = settings.mode !== "online-only";
         const tryOnline = settings.mode !== "offline-only";
 
         if (tryOffline) {
             try {
+                onProgress("Using on-device AI");
                 const res = await aiOnDevice(op, text, targetLang);
                 if (res) return res;
-            } catch (e) {
+            } catch {
                 // fall through to online
             }
         }
         if (!tryOnline) throw new Error("On-device AI unavailable.");
 
+        onProgress(tryOffline ? "Falling back to cloud AI" : "Using cloud AI");
         const online = await aiOnline(op, text, targetLang);
         if (!online) throw new Error("Backend AI unavailable.");
         return online;
@@ -368,19 +499,26 @@
         lastRange = newRange;
     }
 
+    // Translation bubble (fixed + viewport coords)
     function showTranslationBubble(range, text) {
-        const rect = getRangeRect(range);
+        const vp = getViewportRect(range);
         const bubble = document.createElement("div");
         bubble.className = "pagegenie-translation-bubble";
         bubble.textContent = text;
         Object.assign(bubble.style, {
             position: "fixed",
-            top: Math.max(8, rect.top - 8) + "px",
-            left: Math.max(8, rect.left) + "px",
+            top: Math.max(8, vp.top - 8) + "px",
+            left: Math.max(8, vp.left) + "px",
             maxWidth: "40vw",
-            zIndex: "2147483647"
+            zIndex: "2147483647",
+            background: "rgba(20,20,20,0.96)",
+            color: "#fff",
+            borderRadius: "8px",
+            padding: "8px 10px",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
         });
         document.documentElement.appendChild(bubble);
+        requestAnimationFrame(() => clampToViewport(bubble));
         const close = () => bubble.remove();
         bubble.addEventListener("click", close);
         setTimeout(() => {
@@ -388,6 +526,7 @@
         }, 0);
     }
 
+    // Returns PAGE coordinates (with scroll) — used by toolbar.show (position: absolute)
     function getRangeRect(range) {
         const rects = range.getClientRects();
         const rect = rects[0] || range.getBoundingClientRect();
@@ -395,6 +534,30 @@
             top: (rect?.top || 0) + window.scrollY,
             left: (rect?.left || 0) + window.scrollX
         };
+    }
+
+// 5) NEW: viewport rect for fixed-position overlays (no scroll offsets)
+    function getViewportRect(range) {
+        const rects = range.getClientRects();
+        const rect = rects[0] || range.getBoundingClientRect();
+        return {
+            top: rect?.top || 0,
+            left: rect?.left || 0
+        };
+    }
+
+// 6) Helper to keep bubbles on-screen
+    function clampToViewport(el) {
+        try {
+            const vw = window.innerWidth, vh = window.innerHeight;
+            const bw = el.offsetWidth, bh = el.offsetHeight;
+            const currentLeft = parseFloat(el.style.left || "0");
+            const currentTop = parseFloat(el.style.top || "0");
+            const left = Math.min(Math.max(8, currentLeft), Math.max(8, vw - bw - 8));
+            const top = Math.min(Math.max(8, currentTop), Math.max(8, vh - bh - 8));
+            el.style.left = left + "px";
+            el.style.top = top + "px";
+        } catch {}
     }
 
     function findNearestCodeBlock(node) {
@@ -541,42 +704,39 @@
 
     // Show categories bubble even if selection range is gone (fallback to toolbar or viewport)
     function showCategoriesBubbleWithFallback(categories) {
-        if (!categories) {
-            showMinimalBubble("Note saved");
-            return;
-        }
+        if (!categories) { showMinimalBubble("Note saved"); return; }
 
-        // Try the live selection range first
         const range = (() => {
             const sel = document.getSelection();
             if (sel && sel.rangeCount) return sel.getRangeAt(0).cloneRange();
             return lastRange || null;
         })();
 
-        const rect = range ? getRangeRect(range) :
-            lastAnchorPos ? { top: lastAnchorPos.top - 10, left: lastAnchorPos.left } :
-                { top: window.scrollY + 20, left: window.scrollX + 20 };
+        const vp = range
+            ? getViewportRect(range)
+            : (lastAnchorPosViewport
+                ? { top: lastAnchorPosViewport.top - 10, left: lastAnchorPosViewport.left }
+                : { top: 20, left: 20 });
 
         const bubble = document.createElement("div");
         bubble.className = "pagegenie-categories-bubble";
-
         const topic = categories?.topic || "Note saved";
         const tags = Array.isArray(categories?.tags) ? categories.tags : [];
         const related = Array.isArray(categories?.relatedTo) ? categories.relatedTo : [];
         const summary = categories?.summary || "";
 
         bubble.innerHTML = `
-      <div class="pgc-title">📘 ${escapeHtml(topic)}</div>
-      ${ tags.length ? `<div class="pgc-row"><span class="pgc-label">Tags:</span> ${tags.map(t => `<span class="pgc-chip">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
-      ${ related.length ? `<div class="pgc-row"><span class="pgc-label">Related:</span> ${related.map(t => `<span class="pgc-chip subtle">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
-      ${ summary ? `<div class="pgc-summary">${escapeHtml(summary)}</div>` : "" }
-      <div class="pgc-actions"><button class="pgc-close">Close</button></div>
-    `;
+    <div class="pgc-title">📘 ${escapeHtml(topic)}</div>
+    ${ tags.length ? `<div class="pgc-row"><span class="pgc-label">Tags:</span> ${tags.map(t => `<span class="pgc-chip">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
+    ${ related.length ? `<div class="pgc-row"><span class="pgc-label">Related:</span> ${related.map(t => `<span class="pgc-chip subtle">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
+    ${ summary ? `<div class="pgc-summary">${escapeHtml(summary)}</div>` : "" }
+    <div class="pgc-actions"><button class="pgc-close">Close</button></div>
+  `;
 
         Object.assign(bubble.style, {
             position: "fixed",
-            top: Math.max(8, rect.top) + "px",
-            left: Math.max(8, rect.left) + "px",
+            top: Math.max(8, vp.top) + "px",
+            left: Math.max(8, vp.left) + "px",
             zIndex: "2147483647",
             background: "rgba(20,20,20,0.96)",
             color: "#fff",
@@ -588,8 +748,13 @@
         });
 
         document.documentElement.appendChild(bubble);
+
+        // Clamp within viewport after layout
+        requestAnimationFrame(() => {
+            clampToViewport(bubble);
+        });
+
         bubble.querySelector(".pgc-close")?.addEventListener("click", () => bubble.remove());
-        // Auto-hide on outside click
         setTimeout(() => {
             const hide = (e) => {
                 if (!bubble.contains(e.target)) {
@@ -601,15 +766,19 @@
         }, 0);
     }
 
-    // Minimal fallback bubble if categories are missing
+    // Minimal fallback bubble (also fixed + viewport coords)
     function showMinimalBubble(text) {
+        const pos = lastAnchorPosViewport
+            ? { top: Math.max(8, lastAnchorPosViewport.top - 10), left: Math.max(8, lastAnchorPosViewport.left) }
+            : { top: window.innerHeight ? 20 : (window.scrollY + 20), left: window.innerWidth ? 20 : (window.scrollX + 20) };
+
         const bubble = document.createElement("div");
         bubble.className = "pagegenie-categories-bubble";
         bubble.textContent = text || "Note saved";
         Object.assign(bubble.style, {
             position: "fixed",
-            top: (lastAnchorPos?.top ? Math.max(8, lastAnchorPos.top - 10) : window.scrollY + 20) + "px",
-            left: (lastAnchorPos?.left ? Math.max(8, lastAnchorPos.left) : window.scrollX + 20) + "px",
+            top: pos.top + "px",
+            left: pos.left + "px",
             zIndex: "2147483647",
             background: "rgba(20,20,20,0.96)",
             color: "#fff",
@@ -619,6 +788,7 @@
             boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
         });
         document.documentElement.appendChild(bubble);
+        requestAnimationFrame(() => clampToViewport(bubble));
         setTimeout(() => bubble.remove(), 2500);
     }
 
@@ -703,6 +873,62 @@
         document.documentElement.appendChild(panel);
     }
 
+    // Render a structured panel with headings
+    function showComparePanel({ keyClaim, agreement, drift }) {
+        const panel = document.createElement("div");
+        panel.className = "pagegenie-result-panel";
+        Object.assign(panel.style, {
+            position: "fixed",
+            right: "20px",
+            bottom: "20px",
+            width: "min(520px, 50vw)",
+            maxHeight: "60vh",
+            overflow: "auto",
+            background: "#121212",
+            color: "#eee",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: "8px",
+            padding: "12px",
+            zIndex: "2147483647"
+        });
+
+        const section = (title, text) => {
+            const wrap = document.createElement("div");
+            const h = document.createElement("div");
+            const p = document.createElement("div");
+            h.textContent = title;
+            h.style.fontWeight = "700";
+            h.style.margin = "6px 0 4px";
+            p.textContent = text || "—";
+            p.style.whiteSpace = "pre-wrap";
+            wrap.appendChild(h);
+            wrap.appendChild(p);
+            return wrap;
+        };
+
+        const close = document.createElement("button");
+        close.textContent = "Close";
+        Object.assign(close.style, {
+            marginTop: "8px",
+            background: "#222",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.18)",
+            padding: "4px 8px",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontSize: "12px"
+        });
+        close.addEventListener("click", () => panel.remove());
+
+        panel.append(
+            section("Key Claim", keyClaim),
+            section("Agreement", agreement),
+            section("Concept Drift / Difference", drift),
+            close
+        );
+        document.documentElement.appendChild(panel);
+    }
+
     function escapeHtml(str) {
         return String(str).replace(/[&<>"']/g, s => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[s]));
     }
@@ -739,6 +965,9 @@
             { id: "rewrite", label: "🪄 Rewrite" },
             { id: "translate", label: "🌍 Translate" },
             { id: "save", label: "📘 Save" },
+            { id: "sep", label: "|" },
+            { id: "compare_concept", label: "🔗 Analyze Concept Drift" },
+            { id: "quiz_selection", label: "🧠 Quiz Me" },
             { id: "sep", label: "|" },
             { id: "quick_proof", label: "⚡ Replace with Proofread" },
             { id: "quick_overlay", label: "⚡ Translation Overlay" },
@@ -804,6 +1033,71 @@
         if (!document.documentElement.querySelector(`script[src="${script.src}"]`)) {
             (document.head || document.documentElement).appendChild(script);
         }
+    }
+
+    // =====  Persistent loading toast helper =====
+    function createLoadingToast(initialMessage = "Loading…") {
+        const el = document.createElement("div");
+        el.className = "pagegenie-loading-toast";
+        const icon = document.createElement("span");
+        icon.textContent = "⏳";
+        icon.style.marginRight = "8px";
+        const text = document.createElement("span");
+        text.textContent = initialMessage;
+
+        Object.assign(el.style, {
+            position: "fixed",
+            left: "20px",
+            bottom: "20px",
+            background: "rgba(20,20,20,0.96)",
+            color: "#fff",
+            padding: "10px 12px",
+            borderRadius: "10px",
+            border: "1px solid rgba(255,255,255,0.12)",
+            zIndex: "2147483647",
+            display: "flex",
+            alignItems: "center",
+            maxWidth: "50vw",
+            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+        });
+
+        el.append(icon, text);
+        document.documentElement.appendChild(el);
+
+        // Tiny dots animation for activity
+        let dots = 0;
+        const interval = setInterval(() => {
+            dots = (dots + 1) % 4;
+            const base = text.dataset.base || text.textContent.replace(/\.*$/, "");
+            text.dataset.base = base;
+            text.textContent = base + ".".repeat(dots);
+        }, 400);
+
+        function set(msg) {
+            delete text.dataset.base;
+            text.textContent = msg;
+        }
+        function success(msg = "Done") {
+            clearInterval(interval);
+            icon.textContent = "✅";
+            set(msg);
+            el.style.background = "rgba(8, 80, 30, 0.96)";
+            el.style.borderColor = "rgba(255,255,255,0.18)";
+            setTimeout(close, 900);
+        }
+        function error(msg = "Error") {
+            clearInterval(interval);
+            icon.textContent = "⚠️";
+            set(msg);
+            el.style.background = "rgba(120, 20, 20, 0.96)";
+            el.style.borderColor = "rgba(255,255,255,0.18)";
+            setTimeout(close, 1400);
+        }
+        function close() {
+            try { el.remove(); } catch {}
+        }
+        return { set, success, error, close };
     }
 
     // Dev/test hooks:

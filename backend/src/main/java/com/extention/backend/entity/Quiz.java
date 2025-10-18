@@ -3,6 +3,8 @@ package com.extention.backend.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 
@@ -26,10 +28,9 @@ public class Quiz {
     @Column(length = 512)
     private String articleTitle;
 
-    // JSON string:
-    // {"questions":[{"question":"...","options":["A","B","C","D"],"correctIndex":1,"explanation":"..."}]}
-    @Lob
-    @Column(nullable = false)
+    // Store the quiz questions as JSON text (TEXT, not LOB stream)
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(columnDefinition = "TEXT")
     private String questionsJson;
 
     @CreationTimestamp
