@@ -1,4 +1,3 @@
-// PageGenie content script
 // - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save)
 // - Quick-Fix DOM Injection (Replace with Proofread, Translation Overlay, Insert Code Comments)
 // - Offline (on-device) AI via pageBridge + Online fallback via Spring Boot (/api/v1/ai)
@@ -9,6 +8,26 @@
     // Inject the page-bridge to access on-device AI APIs from page context (window.ai / Prompt API)
     injectPageBridge();
 
+    let onDeviceReady = null;
+    async function ensureOnDeviceReady() {
+        if (onDeviceReady !== null) return onDeviceReady;
+        onDeviceReady = new Promise((resolve) => {
+            // If content script cannot talk to page, assume false after timeout
+            let done = false;
+            const finish = (val) => { if (done) return; done = true; resolve(!!val); };
+            const handler = (ev) => {
+                if (ev.source !== window) return;
+                const d = ev.data;
+                if (!d || d.type !== "PAGEGENIE_AI_READY") return;
+                window.removeEventListener("message", handler, true);
+                finish(!!d.ready);
+            };
+            window.addEventListener("message", handler, true);
+            try { window.postMessage({ type: "PAGEGENIE_AI_PING" }, "*"); } catch {}
+            setTimeout(() => finish(false), 800); // quick probe timeout
+        });
+        return onDeviceReady;
+    }
 
     // Settings state
     let settings = {
@@ -52,24 +71,23 @@
         lastRange = selection.getRangeAt(0).cloneRange();
 
         // Absolute coords for toolbar
-        const rectPage = getRangeRect(lastRange);           // page coords (with scroll) — keeps your toolbar as-is
+        const rectPage = getRangeRect(lastRange);
         toolbar.show(rectPage);
         lastAnchorPos = { top: rectPage.top, left: rectPage.left };
 
         // Viewport coords for bubbles
-        const rectViewport = getViewportRect(lastRange);    // NEW
+        const rectViewport = getViewportRect(lastRange);
         lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
     });
 
     document.addEventListener("mouseup", () => {
-        // Defer to allow selectionchange to run first
         setTimeout(() => {
             const sel = document.getSelection();
             if (!sel || sel.isCollapsed) toolbar.hide();
         }, 50);
     });
 
-    // Handle context menu relay and toasts from background
+    // Handle context menu relay and toasts from background + background-driven loaders
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg?.type === "PAGEGENIE_CONTEXT_ACTION") {
             if (!lastRange || !lastSelectionText) return;
@@ -85,7 +103,6 @@
 
         const id = msg.requestId || "default";
         if (msg.action === "start") {
-            // If a loader with same id exists, close it first
             try { __pg_loaders.get(id)?.close?.(); } catch {}
             const loader = createLoadingToast(msg.message || "Working…");
             __pg_loaders.set(id, loader);
@@ -109,7 +126,6 @@
         }
     });
 
-
     // Toolbar actions
     toolbar.on("summarize", () => runSimpleOp("summarize"));
     toolbar.on("explain", () => runSimpleOp("explain"));
@@ -123,7 +139,6 @@
     toolbar.on("quick_overlay", () => runTranslationOverlay());
     toolbar.on("quick_comment", () => insertCodeComments());
 
-
     // Simple result operations (non-injection)
     async function runSimpleOp(op) {
         if (!lastSelectionText) return;
@@ -134,7 +149,6 @@
             });
             loader.success(opTitle(op) + " ready");
             showResultPanel(result);
-            // Persist op log (optional)
             persist("/api/ops/log", {
                 type: op,
                 source: location.href,
@@ -195,15 +209,9 @@
     // Quick-Fix: Insert code comments in nearest code block
     async function insertCodeComments() {
         const codeEl = findNearestCodeBlock(getSelectionAnchorNode());
-        if (!codeEl) {
-            showToast("No code block detected");
-            return;
-        }
+        if (!codeEl) { showToast("No code block detected"); return; }
         const codeText = getCodeText(codeEl);
-        if (!codeText?.trim()) {
-            showToast("Empty code block");
-            return;
-        }
+        if (!codeText?.trim()) { showToast("Empty code block"); return; }
 
         const loader = createLoadingToast("Adding explainer comments...");
         try {
@@ -238,7 +246,6 @@
             showCategoriesBubbleWithFallback(categories);
             loader.set("Fetching curated suggestions…");
 
-            // optional: fetch suggestions under same loader
             try {
                 const suggestResp = await persist("/api/v1/reading/suggest", {
                     baseUrl: location.href,
@@ -256,31 +263,31 @@
         }
     }
 
-    // Implement the new function anywhere below your other handlers:
-        async function compareConceptDrift() {
-            if (!lastSelectionText) return;
-            const loader = createLoadingToast("Analyzing against your notes…");
-            try {
-                const resp = await sendCompareConcept(lastSelectionText, location.href);
-                if (!resp?.ok) throw new Error(resp?.error || "Compare failed");
-                const data = resp.data || {};
-                loader.success("Analysis ready");
-                showComparePanel({
-                    keyClaim: data.key_claim || data.keyClaim || "",
-                    agreement: data.agreement || "",
-                    drift: data.drift_analysis || data.drift || ""
-                });
-                persist("/api/ops/log", {
-                    type: "analyze_concept_drift",
-                    source: location.href,
-                    input: lastSelectionText,
-                    output: JSON.stringify(data),
-                    ts: Date.now()
-                });
-            } catch (e) {
-                loader.error(e?.message || e);
-            }
+    // Analyze Concept Drift
+    async function compareConceptDrift() {
+        if (!lastSelectionText) return;
+        const loader = createLoadingToast("Analyzing against your notes…");
+        try {
+            const resp = await sendCompareConcept(lastSelectionText, location.href);
+            if (!resp?.ok) throw new Error(resp?.error || "Compare failed");
+            const data = resp.data || {};
+            loader.success("Analysis ready");
+            showComparePanel({
+                keyClaim: data.key_claim || data.keyClaim || "",
+                agreement: data.agreement || "",
+                drift: data.drift_analysis || data.drift || ""
+            });
+            persist("/api/ops/log", {
+                type: "analyze_concept_drift",
+                source: location.href,
+                input: lastSelectionText,
+                output: JSON.stringify(data),
+                ts: Date.now()
+            });
+        } catch (e) {
+            loader.error(e?.message || e);
         }
+    }
 
     function sendCompareConcept(selectionText, pageUrl) {
         return new Promise((resolve) => {
@@ -299,6 +306,7 @@
         });
     }
 
+    // Quiz from selection
     async function quizSelectedText() {
         if (!lastSelectionText) {
             showToast("Select some text to quiz");
@@ -307,7 +315,6 @@
         const loader = createLoadingToast("Generating quiz from selection…");
         try {
             loader.set("Using cloud AI to generate quiz");
-            // Keep payload simple; backend will handle prompt and storage
             const resp = await persist("/api/v1/quiz/generate-from-text", {
                 text: lastSelectionText,
                 sourceUrl: location.href,
@@ -318,20 +325,15 @@
             const quizId = data.id ?? data.quizId ?? data?.data?.id ?? data?.data?.quizId;
             if (!quizId) throw new Error("Quiz ID missing in response");
 
-            // Success
             loader.success("Quiz ready");
-
-            // Ask background to open quiz tab (safer than window.open from page)
             chrome.runtime.sendMessage({ type: "PAGEGENIE_OPEN_QUIZ", quizId }, () => {
                 if (chrome.runtime.lastError) {
-                    // Fallback: try opening directly
                     try {
                         window.open(chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(quizId)}`), "_blank");
                     } catch {}
                 }
             });
 
-            // Log operation (optional)
             persist("/api/ops/log", {
                 type: "quiz_from_selection",
                 source: location.href,
@@ -344,54 +346,92 @@
         }
     }
 
-    // AI routing: offline → online (or per settings)
+    // AI routing: offline → online (or per settings), with per-op availability
     async function runAI(op, text, targetLang, progressCb) {
-        // Safe fallback if no progress callback was provided
         const onProgress = (typeof progressCb === "function") ? progressCb : () => {};
+        const userWantsOffline = (settings.mode !== "online-only");
+        const userAllowsOnline = (settings.mode !== "offline-only");
 
-        const tryOffline = settings.mode !== "online-only";
-        const tryOnline = settings.mode !== "offline-only";
+        // Detect if on-device Prompt API is present
+        const deviceAvailable = userWantsOffline ? await ensureOnDeviceReady() : false;
 
-        if (tryOffline) {
+        if (userWantsOffline && deviceAvailable) {
             try {
                 onProgress("Using on-device AI");
-                const res = await aiOnDevice(op, text, targetLang);
+                const res = await aiOnDevice(op, text, targetLang, onProgress);
                 if (res) return res;
             } catch {
-                // fall through to online
+                // fall through to cloud
             }
         }
-        if (!tryOnline) throw new Error("On-device AI unavailable.");
 
-        onProgress(tryOffline ? "Falling back to cloud AI" : "Using cloud AI");
+        if (!userAllowsOnline) {
+            // Strict offline-only and device unavailable → throw
+            throw new Error("On-device AI unavailable.");
+        }
+
+        onProgress(deviceAvailable ? "Falling back to cloud AI" : "Using cloud AI");
         const online = await aiOnline(op, text, targetLang);
         if (!online) throw new Error("Backend AI unavailable.");
         return online;
     }
 
-    // On-device AI via page bridge (window.postMessage)
-    function aiOnDevice(operation, text, targetLang) {
+    // Safe pageBridge injector (content world; pageBridge must NOT call chrome.*)
+    function injectPageBridge() {
+        try {
+            if (!chrome?.runtime?.getURL) return;
+            const src = chrome.runtime.getURL("content/pageBridge.js");
+            if (document.getElementById("pagegenie-bridge-script")) return;
+            if (document.documentElement.querySelector(`script[src="${src}"]`)) return;
+            const script = document.createElement("script");
+            script.id = "pagegenie-bridge-script";
+            script.src = src;
+            script.type = "text/javascript";
+            (document.head || document.documentElement).appendChild(script);
+        } catch {}
+    }
+
+    // aiOnDevice with standard cleanup + progress forward
+    function aiOnDevice(operation, text, targetLang, progressCb) {
+        const onProgress = (typeof progressCb === "function") ? progressCb : () => {};
         return new Promise((resolve, reject) => {
             const id = "pg_" + Math.random().toString(36).slice(2);
-            const handler = (ev) => {
+            let finished = false;
+            const cleanup = () => {
+                window.removeEventListener("message", resHandler, true);
+                window.removeEventListener("message", progHandler, true);
+                clearTimeout(timer);
+            };
+            const resHandler = (ev) => {
                 if (ev.source !== window) return;
                 const data = ev.data;
                 if (!data || data.type !== "PAGEGENIE_AI_RESPONSE" || data.id !== id) return;
-                window.removeEventListener("message", handler);
+                if (finished) return;
+                finished = true;
+                cleanup();
                 if (data.ok) resolve(data.result);
                 else reject(new Error(data.error || "On-device AI error"));
             };
-            window.addEventListener("message", handler);
-            window.postMessage({
-                type: "PAGEGENIE_AI_REQUEST",
-                id,
-                operation,
-                text,
-                targetLang
-            }, "*");
-            // 20s timeout
-            setTimeout(() => {
-                window.removeEventListener("message", handler);
+            const progHandler = (ev) => {
+                if (ev.source !== window) return;
+                const data = ev.data;
+                if (!data || data.type !== "PAGEGENIE_AI_PROGRESS" || data.id !== id) return;
+                try { onProgress(`On-device • ${data.message}`); } catch {}
+            };
+            window.addEventListener("message", resHandler, true);
+            window.addEventListener("message", progHandler, true);
+            try {
+                window.postMessage({ type: "PAGEGENIE_AI_REQUEST", id, operation, text, targetLang }, "*");
+            } catch (e) {
+                finished = true;
+                cleanup();
+                reject(new Error("Failed to talk to page bridge"));
+                return;
+            }
+            const timer = setTimeout(() => {
+                if (finished) return;
+                finished = true;
+                cleanup();
                 reject(new Error("On-device AI timeout"));
             }, 20000);
         });
@@ -413,7 +453,6 @@
         return result;
     }
 
-    // Map operations to backend enum values (now includes comment_code)
     function opToAction(op) {
         switch (op) {
             case "summarize":
@@ -421,14 +460,13 @@
             case "explain":
             case "translate":
             case "proofread":
-            case "comment_code": // enable online path for code comments
+            case "comment_code":
                 return op;
             default:
                 return null;
         }
     }
 
-    // Accept multiple backend response shapes
     function extractAIResult(data) {
         if (!data) return "";
         if (typeof data === "string") return data;
@@ -439,15 +477,11 @@
         return "";
     }
 
-    // Utility: strip Markdown code fences that models sometimes include
     function stripMarkdownCodeFences(s) {
         if (!s) return s;
-        // Remove leading/trailing triple backticks with optional language
-        // ```lang\n ... \n```
         const fenceRegex = /^```[\w+-]*\s*\n([\s\S]*?)\n```$/m;
         const m = s.match(fenceRegex);
         if (m && m[1]) return m[1];
-        // Also handle inline single-fence cases
         if (s.startsWith("```") && s.endsWith("```")) {
             return s.replace(/^```[\w+-]*\s*\n?/, "").replace(/```$/, "");
         }
@@ -462,11 +496,7 @@
                     return resolve({ ok: false, error: "Extension context invalidated. Refresh page and try again." });
                 }
                 chrome.runtime.sendMessage(
-                    {
-                        type: "PAGEGENIE_PERSIST",
-                        endpoint,
-                        payload
-                    },
+                    { type: "PAGEGENIE_PERSIST", endpoint, payload },
                     (resp) => {
                         if (chrome.runtime.lastError) {
                             return resolve({ ok: false, error: chrome.runtime.lastError.message || "Message failed" });
@@ -489,7 +519,6 @@
         const textNode = document.createTextNode(replacement);
         range.deleteContents();
         range.insertNode(textNode);
-        // Reselect the replaced text
         const sel = document.getSelection();
         sel.removeAllRanges();
         const newRange = document.createRange();
@@ -536,7 +565,7 @@
         };
     }
 
-// 5) NEW: viewport rect for fixed-position overlays (no scroll offsets)
+    // Viewport rect for fixed-position overlays (no scroll offsets)
     function getViewportRect(range) {
         const rects = range.getClientRects();
         const rect = rects[0] || range.getBoundingClientRect();
@@ -546,7 +575,7 @@
         };
     }
 
-// 6) Helper to keep bubbles on-screen
+    // Keep bubbles on-screen
     function clampToViewport(el) {
         try {
             const vw = window.innerWidth, vh = window.innerHeight;
@@ -570,12 +599,10 @@
     }
 
     function getCodeText(codeEl) {
-        // Preserve text content (avoid innerHTML which may contain spans)
         return codeEl.innerText ?? codeEl.textContent ?? "";
     }
 
     function setCodeText(codeEl, text) {
-        // Prefer textContent to keep highlighting libs from re-marking incorrectly
         codeEl.textContent = text;
     }
 
@@ -666,16 +693,11 @@
 
     // Categories + Suggestions UI
 
-    // Robust JSON parser: handles plain objects, strings, and double-encoded JSON strings
     function safeParseJson(s) {
         if (!s) return null;
         if (typeof s === "object") return s;
         if (typeof s !== "string") return null;
-
-        // Try direct parse
         try { return JSON.parse(s); } catch {}
-
-        // Handle quoted/double-encoded JSON e.g. "\"{...}\""
         const trimmed = s.trim();
         const looksQuoted = (trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"));
         if (looksQuoted) {
@@ -691,7 +713,6 @@
         return null;
     }
 
-    // Accept arrays, single object, or wrapped data/items/suggestions arrays
     function normalizeSuggestionsShape(raw) {
         if (!raw) return [];
         if (Array.isArray(raw)) return raw;
@@ -702,7 +723,6 @@
         return [];
     }
 
-    // Show categories bubble even if selection range is gone (fallback to toolbar or viewport)
     function showCategoriesBubbleWithFallback(categories) {
         if (!categories) { showMinimalBubble("Note saved"); return; }
 
@@ -748,11 +768,7 @@
         });
 
         document.documentElement.appendChild(bubble);
-
-        // Clamp within viewport after layout
-        requestAnimationFrame(() => {
-            clampToViewport(bubble);
-        });
+        requestAnimationFrame(() => clampToViewport(bubble));
 
         bubble.querySelector(".pgc-close")?.addEventListener("click", () => bubble.remove());
         setTimeout(() => {
@@ -766,7 +782,6 @@
         }, 0);
     }
 
-    // Minimal fallback bubble (also fixed + viewport coords)
     function showMinimalBubble(text) {
         const pos = lastAnchorPosViewport
             ? { top: Math.max(8, lastAnchorPosViewport.top - 10), left: Math.max(8, lastAnchorPosViewport.left) }
@@ -938,7 +953,6 @@
     }
 
     // UI toolbar
-
     function createToolbar() {
         const root = document.createElement("div");
         root.className = "pagegenie-toolbar";
@@ -964,8 +978,8 @@
             { id: "explain", label: "💬 Explain" },
             { id: "rewrite", label: "🪄 Rewrite" },
             { id: "translate", label: "🌍 Translate" },
-            { id: "save", label: "📘 Save" },
             { id: "sep", label: "|" },
+            { id: "save", label: "📘 Save" },
             { id: "compare_concept", label: "🔗 Analyze Concept Drift" },
             { id: "quiz_selection", label: "🧠 Quiz Me" },
             { id: "sep", label: "|" },
@@ -1008,34 +1022,21 @@
         btns.forEach(b => root.appendChild(b));
         document.documentElement.appendChild(root);
 
-        function on(id, fn) {
-            handlers[id] = fn;
-        }
+        function on(id, fn) { handlers[id] = fn; }
         function show(pos) {
             root.style.display = "flex";
             root.style.top = (pos.top - 40) + "px";
             root.style.left = pos.left + "px";
-            // Remember last anchor position globally too
             lastAnchorPos = { top: pos.top, left: pos.left };
         }
-        function hide() {
-            root.style.display = "none";
-        }
+        function hide() { root.style.display = "none"; }
 
         return { on, show, hide };
     }
 
-    function injectPageBridge() {
-        const script = document.createElement("script");
-        script.src = chrome.runtime.getURL("content/pageBridge.js");
-        script.type = "text/javascript";
-        // Make sure it's injected once
-        if (!document.documentElement.querySelector(`script[src="${script.src}"]`)) {
-            (document.head || document.documentElement).appendChild(script);
-        }
-    }
 
-    // =====  Persistent loading toast helper =====
+
+    // Persistent loading toast helper
     function createLoadingToast(initialMessage = "Loading…") {
         const el = document.createElement("div");
         el.className = "pagegenie-loading-toast";
@@ -1065,7 +1066,6 @@
         el.append(icon, text);
         document.documentElement.appendChild(el);
 
-        // Tiny dots animation for activity
         let dots = 0;
         const interval = setInterval(() => {
             dots = (dots + 1) % 4;
@@ -1100,14 +1100,12 @@
         return { set, success, error, close };
     }
 
-    // Dev/test hooks:
-    // window.__pg_showSuggestions([{ suggestedUrl: "https://example.com", title: "Example", reason: "Why it matters" }])
+    // Dev/test hooks
     window.__pg_showSuggestions = function(example) {
         const arr = normalizeSuggestionsShape(example);
         if (arr.length) showSuggestionsPanel(arr);
     };
-    // window.__pg_showCategories({ topic: "Topic", tags:["A","B"], relatedTo:["X"], summary:"..." })
     window.__pg_showCategories = function(obj) {
-        try { showCategoriesBubbleWithFallback(obj); } catch (e) { /* ignore */ }
+        try { showCategoriesBubbleWithFallback(obj); } catch (e) {}
     };
 })();

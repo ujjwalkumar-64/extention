@@ -12,22 +12,17 @@
     "scripting",
     "activeTab",
     "contextMenus",
-    "tabs",
-    "clipboardRead"
+    "tabs"
   ],
   "host_permissions": [
     "http://localhost:8098/*",
-    "https://localhost:8098/*",
-    "<all_urls>",
-    "https://docs.google.com/*",
-    "https://*.office.com/*",
-    "https://*.sharepoint.com/*",
-    "https://*.googleusercontent.com/*"
+    "https://localhost:8098/*"
   ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
+
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
@@ -38,9 +33,7 @@
       "css": [
         "content/toolbar.css"
       ],
-      "run_at": "document_end",
-      "all_frames": true,
-      "match_about_blank": true
+      "run_at": "document_end"
     }
   ],
   "web_accessible_resources": [
