@@ -3,7 +3,6 @@
 // (Translator, Proofreader, Summarizer, Rewriter, Writer) when available,
 // falls back to Prompt API (window.ai.createTextSession), then lets the
 // content script fall back to cloud/backend if none are available.
-//
 // Communicates with the content script using window.postMessage events:
 // - PAGEGENIE_AI_PING     => replies with PAGEGENIE_AI_READY { ready: boolean }
 // - PAGEGENIE_AI_REQUEST  => replies with PAGEGENIE_AI_RESPONSE { ok, result|error, id }
@@ -42,7 +41,7 @@
 
     // Normalize any API output to plain string
     function cleanProofreadText(s) {
-        // Strip common debug prefixes the local API may add
+        // Strip common debug prefixes some local APIs may add
         return String(s || "").replace(/^\s*(PROOFREAD(?:_TEXT)?|CORRECTED(?:_TEXT)?)\s*:\s*/i, "").trim();
     }
 
@@ -51,9 +50,11 @@
         if (typeof out === "string") return cleanProofreadText(out);
 
         if (typeof out === "object") {
-            // Prefer the corrected fields first
+            // Prefer Proofreader doc fields first
+            if (typeof out.corrected === "string") return cleanProofreadText(out.corrected);
             if (typeof out.correctedText === "string") return cleanProofreadText(out.correctedText);
             if (typeof out.correctedInput === "string") return cleanProofreadText(out.correctedInput);
+
             if (typeof out.text === "string") return cleanProofreadText(out.text);
             if (typeof out.result === "string") return cleanProofreadText(out.result);
             if (typeof out.output === "string") return cleanProofreadText(out.output);
@@ -71,6 +72,24 @@
         }
 
         return cleanProofreadText(String(out));
+    }
+
+    // Safer string coercion for inputs
+    function toStringSafe(v) {
+        if (v == null) return "";
+        if (typeof v === "string") return v;
+        try { if (typeof v === "object" && v.nodeType) return v.textContent || ""; } catch {}
+        return String(v);
+    }
+
+    // Detect Writer “misfire” responses so we can fall back
+    function isWriterMisfire(s) {
+        const msg = String(s || "");
+        return (
+            /please provide the object/i.test(msg) ||
+            /\[object Object\]/.test(msg) ||
+            /not a valid object or instruction/i.test(msg)
+        );
     }
 
     // --------------- Prompt API (fallback) ---------------
@@ -196,6 +215,26 @@
         }
     }
 
+    // Reuse progress for instances that emit 'downloadprogress' directly (Rewriter doc)
+    function attachInstanceProgressMinimal(id, inst) {
+        try {
+            let done = false;
+            inst.addEventListener?.("downloadprogress", (e) => {
+                const loaded = (e?.loaded ?? e?.detail?.loaded ?? e?.progress ?? null);
+                const total  = (e?.total  ?? e?.detail?.total  ?? null);
+                let ratio = null;
+                if (typeof loaded === "number" && typeof total === "number" && total > 0) ratio = loaded / total;
+                else if (typeof loaded === "number" && loaded >= 0 && loaded <= 1) ratio = loaded;
+                else if (typeof e?.progress === "number" && e.progress >= 0 && e.progress <= 1) ratio = e.progress;
+                const pct = ratio == null ? null : Math.max(0, Math.min(100, Math.floor(ratio * 100)));
+                if (pct != null && pct >= 100 && !done) {
+                    done = true;
+                    pingProgress(id, `Downloading model 100%`);
+                }
+            });
+        } catch {}
+    }
+
     async function callTranslator(id, text, srcLang, dstLang) {
         if (!hasTranslator()) throw new Error("Translator API not available");
         pingProgress(id, "Using Translator API");
@@ -244,136 +283,213 @@
         return ensureText(out);
     }
 
-    // Summarizer API (best-effort shapes)
-    function hasSummarizer() {
-        const S = window.Summarizer;
-        return !!(S && (isFn(S.create) || isFn(S.summarize)));
+    // ---------- Summarizer (doc-based) ----------
+    async function summarizerAvailability() {
+        try {
+            if (!window.Summarizer?.availability) return "unknown";
+            return await window.Summarizer.availability(); // "available" | "after-download" | "unavailable"
+        } catch { return "unknown"; }
     }
+
+    async function getSummarizer(id, options = {}) {
+        if (!window.Summarizer?.create) throw new Error("Summarizer API not available");
+        const avail = await summarizerAvailability();
+        if (avail === "unavailable") throw new Error("Summarizer API unavailable");
+
+        const baseOpts = {
+            sharedContext: "Web page selection",
+            type: "key-points",
+            format: "markdown",
+            length: "medium",
+            monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} },
+            ...options
+        };
+
+        return await withTimeout(
+            window.Summarizer.create(baseOpts),
+            45000,
+            "Summarizer creation timed out"
+        );
+    }
+
     async function callSummarizer(id, text) {
-        const S = window.Summarizer;
-        if (!S) throw new Error("Summarizer API not available");
+        if (!window.Summarizer) throw new Error("Summarizer API not available");
         pingProgress(id, "Using Summarizer API");
-        if (isFn(S.summarize)) {
-            const r = await withTimeout(S.summarize(text), 20000, "Summarizer timed out");
-            return ensureText(r);
-        }
-        if (isFn(S.create)) {
-            const inst = await withTimeout(S.create({ monitor: mkMonitor(id) }), 30000, "Summarizer creation timed out");
-            if (isFn(inst.summarize)) {
-                const r = await withTimeout(inst.summarize(text), 20000, "Summarizer timed out");
-                return ensureText(r);
-            }
-            if (isFn(inst.generate)) {
-                const r = await withTimeout(inst.generate({ task: "summarize", text }), 20000, "Summarizer timed out");
-                return ensureText(r);
-            }
-        }
-        throw new Error("Summarizer API shape not supported");
+        const summarizer = await getSummarizer(id);
+        const input = toStringSafe(text);
+        const r = await withTimeout(
+            summarizer.summarize(input, { context: "Summarize clearly for a general audience." }),
+            20000,
+            "Summarizer timed out"
+        );
+        return ensureText(r);
     }
 
-    // Proofreader API
-    function hasProofreader() {
-        const P = window.Proofreader;
-        return !!(P && (isFn(P.create) || isFn(P.proofread)));
+    // ---------- Proofreader (doc-based) ----------
+    async function proofreaderAvailability() {
+        try {
+            if (!window.Proofreader?.availability) return "unknown";
+            const av = await (window.Proofreader.availability("downloadable"));
+            // Normalize: true => available, false => unavailable; string passthrough
+            if (av === true) return "available";
+            if (av === false) return "unavailable";
+            return String(av || "unknown");
+        } catch { return "unknown"; }
     }
-    // Replace your existing callProofreader with this version
+
+    async function getProofreader(id, options = {}) {
+        if (!window.Proofreader?.create) throw new Error("Proofreader API not available");
+
+        const avail = await proofreaderAvailability();
+        if (avail === "unavailable") throw new Error("Proofreader API unavailable");
+
+        const baseOpts = {
+            expectedInputLanguages: ["en"],
+            monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} },
+            ...options
+        };
+
+        return await withTimeout(
+            window.Proofreader.create(baseOpts),
+            45000,
+            "Proofreader creation timed out"
+        );
+    }
+
     async function callProofreader(id, text) {
-        const P = window.Proofreader;
-        if (!P) throw new Error("Proofreader API not available");
+        if (!window.Proofreader) throw new Error("Proofreader API not available");
         pingProgress(id, "Using Proofreader API");
-
-        if (typeof P.proofread === "function") {
-            const r = await withTimeout(P.proofread(text), 20000, "Proofreader timed out");
-            return ensureText(r);
-        }
-        if (typeof P.create === "function") {
-            const inst = await withTimeout(P.create({ monitor: mkMonitor(id) }), 30000, "Proofreader creation timed out");
-            if (typeof inst.proofread === "function") {
-                const r = await withTimeout(inst.proofread(text), 20000, "Proofreader timed out");
-                return ensureText(r);
-            }
-            if (typeof inst.generate === "function") {
-                const r = await withTimeout(inst.generate({ task: "proofread", text }), 20000, "Proofreader timed out");
-                return ensureText(r);
-            }
-        }
-        throw new Error("Proofreader API shape not supported");
+        const proofreader = await getProofreader(id);
+        const input = toStringSafe(text);
+        const r = await withTimeout(proofreader.proofread(input), 20000, "Proofreader timed out");
+        // r.corrected is the fully corrected input per docs
+        return ensureText(r);
     }
 
-    // Rewriter API
-    function hasRewriter() {
-        const R = window.Rewriter;
-        return !!(R && (isFn(R.create) || isFn(R.rewrite)));
+    // ---------- Rewriter (doc-based) ----------
+    async function rewriterAvailability() {
+        try {
+            if (!window.Rewriter?.availability) return "unknown";
+            return await window.Rewriter.availability(); // "available" | "after-download" | "unavailable"
+        } catch { return "unknown"; }
     }
+
+    async function getRewriter(id, options = {}) {
+        if (!window.Rewriter?.create) throw new Error("Rewriter API not available");
+        const avail = await rewriterAvailability();
+        if (avail === "unavailable") throw new Error("Rewriter API unavailable");
+
+        const baseOpts = {
+            // sharedContext: optional, e.g., document.title
+            tone: "neutral",
+            format: "plain-text",
+            length: "medium",
+            ...options
+        };
+
+        const inst = await withTimeout(
+            window.Rewriter.create(baseOpts),
+            45000,
+            "Rewriter creation timed out"
+        );
+        // Doc: instance emits 'downloadprogress'
+        attachInstanceProgressMinimal(id, inst);
+        return inst;
+    }
+
     async function callRewriter(id, text) {
-        const R = window.Rewriter;
-        if (!R) throw new Error("Rewriter API not available");
+        if (!window.Rewriter) throw new Error("Rewriter API not available");
         pingProgress(id, "Using Rewriter API");
-        if (isFn(R.rewrite)) {
-            const r = await withTimeout(R.rewrite(text), 20000, "Rewriter timed out");
-            return ensureText(r);
-        }
-        if (isFn(R.create)) {
-            const inst = await withTimeout(R.create({ monitor: mkMonitor(id) }), 30000, "Rewriter creation timed out");
-            if (isFn(inst.rewrite)) {
-                const r = await withTimeout(inst.rewrite(text), 20000, "Rewriter timed out");
-                return ensureText(r);
-            }
-            if (isFn(inst.generate)) {
-                const r = await withTimeout(inst.generate({ task: "rewrite", text }), 20000, "Rewriter timed out");
-                return ensureText(r);
-            }
-        }
-        throw new Error("Rewriter API shape not supported");
+        const rewriter = await getRewriter(id);
+        const input = toStringSafe(text);
+        // Doc: rewrite(input, { context })
+        const r = await withTimeout(
+            rewriter.rewrite(input, { context: "Improve clarity and flow without changing meaning." }),
+            20000,
+            "Rewriter timed out"
+        );
+        return ensureText(r);
     }
 
-    // Writer API (used for explain, generic)
-    function hasWriter() {
-        const W = window.Writer;
-        return !!(W && (isFn(W.create) || isFn(W.write)));
+    // ---------- Writer (doc-based) ----------
+    async function writerAvailability() {
+        try {
+            if (!window.Writer?.availability) return "unknown";
+            return await window.Writer.availability(); // "available" | "after-download" | "unavailable"
+        } catch {
+            return "unknown";
+        }
     }
+
+    async function getWriter(id, options = {}) {
+        if (!window.Writer?.create) throw new Error("Writer API not available");
+
+        const avail = await writerAvailability();
+        if (avail === "unavailable") throw new Error("Writer API unavailable");
+
+        const baseOpts = {
+            tone: "neutral",
+            format: "plain-text",
+            length: "medium",
+            ...options
+        };
+
+        if (avail === "after-download") {
+            return await withTimeout(
+                window.Writer.create({
+                    ...baseOpts,
+                    monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} }
+                }),
+                45000,
+                "Writer creation timed out"
+            );
+        }
+
+        return await withTimeout(
+            window.Writer.create(baseOpts),
+            30000,
+            "Writer creation timed out"
+        );
+    }
+
     async function callWriterExplain(id, text) {
-        const W = window.Writer;
-        if (!W) throw new Error("Writer API not available");
+        if (!window.Writer) throw new Error("Writer API not available");
         pingProgress(id, "Using Writer API (explain)");
-        if (isFn(W.write)) {
-            const r = await withTimeout(W.write({ instruction: "Explain clearly for a general audience.", text }), 20000, "Writer timed out");
-            return ensureText(r);
-        }
-        if (isFn(W.create)) {
-            const inst = await withTimeout(W.create({ monitor: mkMonitor(id) }), 30000, "Writer creation timed out");
-            if (isFn(inst.write)) {
-                const r = await withTimeout(inst.write({ instruction: "Explain clearly for a general audience.", text }), 20000, "Writer timed out");
-                return ensureText(r);
-            }
-            if (isFn(inst.generate)) {
-                const r = await withTimeout(inst.generate({ task: "explain", text }), 20000, "Writer timed out");
-                return ensureText(r);
-            }
-        }
-        throw new Error("Writer API shape not supported");
+
+        const writer = await getWriter(id, {
+            tone: "neutral",
+            format: "plain-text",
+            length: "medium"
+        });
+
+        const input = toStringSafe(text);
+        const prompt = `Explain the following text clearly for a general audience:\n\n${input}`;
+        const ctx = { context: "General explanation" };
+
+        const r = await withTimeout(writer.write(prompt, ctx), 20000, "Writer timed out");
+        const s = ensureText(r);
+        if (isWriterMisfire(s)) throw new Error("Writer misfire");
+        return s;
     }
 
     async function callWriterGeneric(id, text) {
-        const W = window.Writer;
-        if (!W) throw new Error("Writer API not available");
+        if (!window.Writer) throw new Error("Writer API not available");
         pingProgress(id, "Using Writer API (generic)");
-        if (isFn(W.write)) {
-            const r = await withTimeout(W.write({ instruction: "Process the text and return the best possible result.", text }), 20000, "Writer timed out");
-            return ensureText(r);
-        }
-        if (isFn(W.create)) {
-            const inst = await withTimeout(W.create({ monitor: mkMonitor(id) }), 30000, "Writer creation timed out");
-            if (isFn(inst.write)) {
-                const r = await withTimeout(inst.write({ instruction: "Process the text and return the best possible result.", text }), 20000, "Writer timed out");
-                return ensureText(r);
-            }
-            if (isFn(inst.generate)) {
-                const r = await withTimeout(inst.generate({ task: "generic", text }), 20000, "Writer timed out");
-                return ensureText(r);
-            }
-        }
-        throw new Error("Writer API shape not supported");
+
+        const writer = await getWriter(id, {
+            tone: "neutral",
+            format: "plain-text",
+            length: "medium"
+        });
+
+        const input = toStringSafe(text);
+        const prompt = `Process the following text and return a concise, high-quality result:\n\n${input}`;
+        const ctx = { context: "Generic transform" };
+
+        const r = await withTimeout(writer.write(prompt, ctx), 20000, "Writer timed out");
+        const s = ensureText(r);
+        if (isWriterMisfire(s)) throw new Error("Writer misfire");
+        return s;
     }
 
     // Minimal monitor factory for non-translation APIs (emit only 100%)
@@ -388,13 +504,18 @@
         const data = event.data;
         if (!data || data.type !== NS_PING) return;
 
-        // "Ready" if ANY on-device path exists for at least one op
+        const writerAvail = await writerAvailability();
+        const rewriterAvail = await rewriterAvailability();
+        const summarizerAvail = await summarizerAvailability();
+        const proofreaderAvail = await proofreaderAvailability();
+
+        // "Ready" if ANY on-device path exists or is downloadable
         const ready =
             hasTranslator() ||
-            hasSummarizer() ||
-            hasProofreader() ||
-            hasRewriter() ||
-            hasWriter() ||
+            rewriterAvail === "available" || rewriterAvail === "after-download" ||
+            summarizerAvail === "available" || summarizerAvail === "after-download" ||
+            proofreaderAvail === "available" || proofreaderAvail === "after-download" ||
+            writerAvail === "available" || writerAvail === "after-download" ||
             (await hasPrompt());
 
         try { window.postMessage({ type: NS_READY, ready: !!ready }, "*"); } catch {}
@@ -438,11 +559,7 @@
 
                 case "summarize": {
                     try {
-                        if (hasSummarizer()) {
-                            output = await callSummarizer(id, text);
-                        } else {
-                            throw new Error("Summarizer not present");
-                        }
+                        output = await callSummarizer(id, text);
                     } catch {
                         pingProgress(id, "Using Prompt API (summarize)");
                         const s = await getPromptSession();
@@ -457,16 +574,14 @@
                     break;
                 }
 
-                // In your main request handler's "proofread" case, ensure the Prompt fallback also cleans the text
                 case "proofread": {
+                    // Prefer Proofreader, then Rewriter/Writer, then Prompt
                     let ok = false;
-                    if (hasProofreader()) {
-                        try { output = await callProofreader(id, text); ok = true; } catch {}
-                    }
-                    if (!ok && hasRewriter()) {
+                    try { output = await callProofreader(id, text); ok = true; } catch {}
+                    if (!ok) {
                         try { pingProgress(id, "Using Rewriter API (proofread)"); output = await callRewriter(id, text); ok = true; } catch {}
                     }
-                    if (!ok && hasWriter()) {
+                    if (!ok && (await writerAvailability()) !== "unavailable") {
                         try { pingProgress(id, "Using Writer API (proofread)"); output = await callWriterGeneric(id, text); ok = true; } catch {}
                     }
                     if (!ok) {
@@ -484,35 +599,16 @@
 
                 case "rewrite": {
                     try {
-                        if (hasRewriter()) {
-                            output = await callRewriter(id, text);
-                        } else if (hasWriter()) {
-                            pingProgress(id, "Using Writer API (rewrite)");
-                            const W = window.Writer;
-                            if (isFn(W?.write)) {
-                                output = ensureText(
-                                    await withTimeout(W.write({ instruction: "Rewrite to improve clarity and flow without changing meaning.", text }), 20000, "Writer timed out")
-                                );
-                            } else if (isFn(W?.create)) {
-                                const inst = await withTimeout(W.create({ monitor: mkMonitor(id) }), 30000, "Writer creation timed out");
-                                if (isFn(inst.write)) {
-                                    output = ensureText(
-                                        await withTimeout(inst.write({ instruction: "Rewrite to improve clarity and flow without changing meaning.", text }), 20000, "Writer timed out")
-                                    );
-                                } else if (isFn(inst.generate)) {
-                                    output = ensureText(
-                                        await withTimeout(inst.generate({ task: "rewrite", text }), 20000, "Writer timed out")
-                                    );
-                                } else {
-                                    throw new Error("Writer shape not supported");
-                                }
-                            } else {
-                                throw new Error("Writer not present");
-                            }
-                        } else {
-                            throw new Error("No rewriter/writer present");
-                        }
+                        output = await callRewriter(id, text);
                     } catch {
+                        // Try Writer generic before Prompt
+                        try {
+                            if ((await writerAvailability()) !== "unavailable") {
+                                pingProgress(id, "Using Writer API (rewrite)");
+                                output = await callWriterGeneric(id, text);
+                                break;
+                            }
+                        } catch {}
                         pingProgress(id, "Using Prompt API (rewrite)");
                         const s = await getPromptSession();
                         output = ensureText(
@@ -528,7 +624,7 @@
 
                 case "explain": {
                     try {
-                        if (hasWriter()) {
+                        if ((await writerAvailability()) !== "unavailable") {
                             output = await callWriterExplain(id, text);
                         } else {
                             throw new Error("Writer not present");
@@ -538,7 +634,7 @@
                         const s = await getPromptSession();
                         output = ensureText(
                             await withTimeout(
-                                s.prompt(buildPrompt("explain", text)),
+                                s.prompt(buildPrompt("explain", toStringSafe(text))),
                                 30000,
                                 "Prompt explain timed out"
                             )
@@ -562,7 +658,7 @@
 
                 default: {
                     let ok = false;
-                    if (hasWriter()) {
+                    if ((await writerAvailability()) !== "unavailable") {
                         try { output = await callWriterGeneric(id, text); ok = true; } catch {}
                     }
                     if (!ok) {
