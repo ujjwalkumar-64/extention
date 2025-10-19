@@ -5,6 +5,7 @@
 // content script fall back to cloud/backend if none are available.
 // Communicates with the content script using window.postMessage events:
 // - PAGEGENIE_AI_PING     => replies with PAGEGENIE_AI_READY { ready: boolean }
+// - PAGEGENIE_AI_PREWARM  => (optional) asks bridge to pre-create local sessions
 // - PAGEGENIE_AI_REQUEST  => replies with PAGEGENIE_AI_RESPONSE { ok, result|error, id }
 // - Emits PAGEGENIE_AI_PROGRESS { id, message } for user-friendly loaders.
 //
@@ -19,11 +20,37 @@
     const NS_PROG  = "PAGEGENIE_AI_PROGRESS";
     const NS_PING  = "PAGEGENIE_AI_PING";
     const NS_READY = "PAGEGENIE_AI_READY";
+    const NS_PREWARM = "PAGEGENIE_AI_PREWARM";
 
     // --------------- Utils ---------------
 
+    // Throttle helper to avoid spamming UI (≈12 fps)
+    function throttle(fn, ms) {
+        let last = 0, queued = null, timer = null;
+        return (...args) => {
+            const now = Date.now();
+            const run = () => { last = Date.now(); queued = null; timer = null; fn(...args); };
+            if (now - last >= ms) {
+                run();
+            } else {
+                queued = args;
+                if (!timer) {
+                    timer = setTimeout(() => {
+                        if (queued) { fn(...queued); }
+                        last = Date.now();
+                        queued = null; timer = null;
+                    }, ms - (now - last));
+                }
+            }
+        };
+    }
+
+    const postProgress = throttle((payload) => {
+        try { window.postMessage(payload, "*"); } catch {}
+    }, 80);
+
     function pingProgress(id, msg) {
-        try { window.postMessage({ type: NS_PROG, id, message: msg }, "*"); } catch {}
+        postProgress({ type: NS_PROG, id, message: msg });
     }
 
     function withTimeout(promise, ms, message = "Timed out") {
@@ -149,6 +176,17 @@
         }
     }
 
+    // --------------- Caches (per-page) ---------------
+
+    const translatorCache = new Map();  // key: `${src}|${dst}` -> instance
+    const writerCache      = new Map(); // key: JSON.stringify(options)
+    const rewriterCache    = new Map(); // key: JSON.stringify(options)
+    const summarizerCache  = new Map(); // key: JSON.stringify(options)
+    const proofreaderCache = new Map(); // key: JSON.stringify(options)
+
+    function cacheGet(map, key) { return map.get(key); }
+    function cacheSet(map, key, inst) { map.set(key, inst); return inst; }
+
     // --------------- Task-specific APIs (preferred) ---------------
 
     // Translator API:
@@ -235,43 +273,38 @@
         } catch {}
     }
 
+    // Cached Translator creation
+    async function getTranslatorInstance(id, src, dst) {
+        const key = `${src || "auto"}|${dst || "en"}`;
+        const cached = cacheGet(translatorCache, key);
+        if (cached) return cached;
+
+        const inst = await withTimeout(
+            window.Translator.create({
+                sourceLanguage: src,
+                targetLanguage: dst,
+                monitor: (m) => attachMonitor(id, m, { verbose: true })
+            }),
+            45000,
+            "Translator creation timed out"
+        );
+        return cacheSet(translatorCache, key, inst);
+    }
+
     async function callTranslator(id, text, srcLang, dstLang) {
         if (!hasTranslator()) throw new Error("Translator API not available");
         pingProgress(id, "Using Translator API");
 
-        const tryCreate = async (src, dst) => {
-            return await withTimeout(
-                window.Translator.create({
-                    sourceLanguage: src,
-                    targetLanguage: dst,
-                    monitor: (m) => attachMonitor(id, m, { verbose: true }) // VERBOSE for translation
-                }),
-                45000,
-                "Translator creation timed out"
-            );
-        };
-
-        let translator;
         const target = nvl(dstLang, "en");
 
+        let translator;
         try {
-            translator = await tryCreate(nvl(srcLang, "auto"), target);
+            translator = await getTranslatorInstance(id, nvl(srcLang, "auto"), target);
         } catch (e1) {
             try {
-                translator = await tryCreate("en", target);
+                translator = await getTranslatorInstance(id, "en", target);
             } catch (e2) {
-                try {
-                    translator = await withTimeout(
-                        window.Translator.create({
-                            targetLanguage: target,
-                            monitor: (m) => attachMonitor(id, m, { verbose: true })
-                        }),
-                        45000,
-                        "Translator creation timed out"
-                    );
-                } catch (e3) {
-                    throw e2;
-                }
+                translator = await getTranslatorInstance(id, undefined, target);
             }
         }
 
@@ -304,12 +337,16 @@
             monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} },
             ...options
         };
+        const key = JSON.stringify(baseOpts);
+        const cached = cacheGet(summarizerCache, key);
+        if (cached) return cached;
 
-        return await withTimeout(
+        const inst = await withTimeout(
             window.Summarizer.create(baseOpts),
             45000,
             "Summarizer creation timed out"
         );
+        return cacheSet(summarizerCache, key, inst);
     }
 
     async function callSummarizer(id, text) {
@@ -348,12 +385,16 @@
             monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} },
             ...options
         };
+        const key = JSON.stringify(baseOpts);
+        const cached = cacheGet(proofreaderCache, key);
+        if (cached) return cached;
 
-        return await withTimeout(
+        const inst = await withTimeout(
             window.Proofreader.create(baseOpts),
             45000,
             "Proofreader creation timed out"
         );
+        return cacheSet(proofreaderCache, key, inst);
     }
 
     async function callProofreader(id, text) {
@@ -386,6 +427,9 @@
             length: "medium",
             ...options
         };
+        const key = JSON.stringify(baseOpts);
+        const cached = cacheGet(rewriterCache, key);
+        if (cached) return cached;
 
         const inst = await withTimeout(
             window.Rewriter.create(baseOpts),
@@ -394,7 +438,7 @@
         );
         // Doc: instance emits 'downloadprogress'
         attachInstanceProgressMinimal(id, inst);
-        return inst;
+        return cacheSet(rewriterCache, key, inst);
     }
 
     async function callRewriter(id, text) {
@@ -433,23 +477,20 @@
             length: "medium",
             ...options
         };
+        const key = JSON.stringify(baseOpts);
+        const cached = cacheGet(writerCache, key);
+        if (cached) return cached;
 
-        if (avail === "after-download") {
-            return await withTimeout(
-                window.Writer.create({
-                    ...baseOpts,
-                    monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} }
-                }),
-                45000,
-                "Writer creation timed out"
-            );
-        }
-
-        return await withTimeout(
-            window.Writer.create(baseOpts),
-            30000,
+        const created = await withTimeout(
+            window.Writer.create(
+                avail === "after-download"
+                    ? { ...baseOpts, monitor(m) { try { attachMonitor(id, m, { verbose: false }); } catch {} } }
+                    : baseOpts
+            ),
+            avail === "after-download" ? 45000 : 30000,
             "Writer creation timed out"
         );
+        return cacheSet(writerCache, key, created);
     }
 
     async function callWriterExplain(id, text) {
@@ -519,6 +560,47 @@
             (await hasPrompt());
 
         try { window.postMessage({ type: NS_READY, ready: !!ready }, "*"); } catch {}
+    });
+
+    // --------------- Prewarm Handler (optional) ---------------
+
+    // Accepts: { type: NS_PREWARM, id?, want: [{ kind, opts? }, ...] }
+    // kind ∈ "prompt"|"translator"|"writer"|"rewriter"|"summarizer"|"proofreader"
+    window.addEventListener("message", async (event) => {
+        if (event.source !== window) return;
+        const data = event.data;
+        if (!data || data.type !== NS_PREWARM) return;
+
+        const id = data.id || "prewarm";
+        const wants = Array.isArray(data.want) ? data.want : [];
+        try {
+            for (const w of wants) {
+                try {
+                    if (w.kind === "prompt") {
+                        pingProgress(id, "Prewarming Prompt session…");
+                        await getPromptSession();
+                    } else if (w.kind === "translator") {
+                        const dst = w.opts?.targetLanguage || "en";
+                        const src = w.opts?.sourceLanguage ?? "auto";
+                        pingProgress(id, `Prewarming Translator ${src}->${dst}…`);
+                        await getTranslatorInstance(id, src, dst);
+                    } else if (w.kind === "writer") {
+                        pingProgress(id, "Prewarming Writer…");
+                        await getWriter(id, w.opts || {});
+                    } else if (w.kind === "rewriter") {
+                        pingProgress(id, "Prewarming Rewriter…");
+                        await getRewriter(id, w.opts || {});
+                    } else if (w.kind === "summarizer") {
+                        pingProgress(id, "Prewarming Summarizer…");
+                        await getSummarizer(id, w.opts || {});
+                    } else if (w.kind === "proofreader") {
+                        pingProgress(id, "Prewarming Proofreader…");
+                        await getProofreader(id, w.opts || {});
+                    }
+                } catch {}
+            }
+            pingProgress(id, "On-device prewarm complete");
+        } catch {}
     });
 
     // --------------- Main Request Handler ---------------

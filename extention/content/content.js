@@ -8,6 +8,48 @@
     // Inject the page-bridge to access on-device AI APIs from page context (window.ai / Prompt API)
     injectPageBridge();
 
+    // Simple throttle to avoid janky frequent UI updates (≈8–12 fps)
+    function throttle(fn, ms = 120) {
+        let last = 0, queued = null, timer = null;
+        return (msg) => {
+            const now = Date.now();
+            const run = (v) => { last = Date.now(); queued = null; timer = null; try { fn(v); } catch {} };
+            if (now - last >= ms) {
+                run(msg);
+            } else {
+                queued = msg;
+                if (!timer) {
+                    timer = setTimeout(() => {
+                        if (queued != null) run(queued);
+                    }, ms - (now - last));
+                }
+            }
+        };
+    }
+
+    // Prewarm local models just-in-time when user shows intent
+    let __pg_prewarmed = false;
+    function prewarmLikely() {
+        if (__pg_prewarmed) return;
+        __pg_prewarmed = true;
+        try {
+            const want = [
+                { kind: "prompt" },
+                { kind: "translator", opts: { targetLanguage: settings.targetLang || "en" } },
+                { kind: "writer" }
+            ];
+            window.postMessage({ type: "PAGEGENIE_AI_PREWARM", id: "prewarm", want }, "*");
+        } catch {}
+    }
+
+    // Trim large inputs for fast on-device operations (not for translate/proofread)
+    function trimForLocal(op, text, limit = 8000) {
+        if (!text || typeof text !== "string") return text;
+        if (op === "translate" || op === "proofread" || op === "comment_code") return text;
+        if (text.length <= limit) return text;
+        return text.slice(0, limit) + "\n\n[...trimmed for speed on device…]";
+    }
+
     let onDeviceReady = null;
     async function ensureOnDeviceReady() {
         if (onDeviceReady !== null) return onDeviceReady;
@@ -78,6 +120,9 @@
         // Viewport coords for bubbles
         const rectViewport = getViewportRect(lastRange);
         lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
+
+        // JIT prewarm once when user shows intent (unless online-only)
+        if (settings.mode !== "online-only") prewarmLikely();
     });
 
     document.addEventListener("mouseup", () => {
@@ -86,6 +131,11 @@
             if (!sel || sel.isCollapsed) toolbar.hide();
         }, 50);
     });
+
+    // If offline-only mode is enabled, try to prewarm as soon as possible
+    if (settings.mode === "offline-only") {
+        prewarmLikely();
+    }
 
     // Handle context menu relay and toasts from background + background-driven loaders
     chrome.runtime.onMessage.addListener((msg) => {
@@ -143,10 +193,14 @@
     async function runSimpleOp(op) {
         if (!lastSelectionText) return;
         const loader = createLoadingToast("Preparing " + opTitle(op));
+        const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
+            const inputText = (settings.mode !== "online-only")
+                ? trimForLocal(op, lastSelectionText)
+                : lastSelectionText;
 
-            const raw = await runAI(op, lastSelectionText, settings.targetLang, (stage) => {
-                loader.set(`${opTitle(op)} • ${stage}`);
+            const raw = await runAI(op, inputText, settings.targetLang, (stage) => {
+                throttledSet(`${opTitle(op)} • ${stage}`);
             });
             const result = toPlainText(raw);
             loader.success(opTitle(op) + " ready");
@@ -167,9 +221,10 @@
     async function replaceWithProofread() {
         if (!lastRange || !lastSelectionText) return;
         const loader = createLoadingToast("Proofreading...");
+        const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
             const raw = await runAI("proofread", lastSelectionText, settings.targetLang, (stage) => {
-                loader.set(`Proofreading • ${stage}`);
+                throttledSet(`Proofreading • ${stage}`);
             });
             const result = stripMarkdownCodeFences(toPlainText(raw)); // ensure string, then strip fences if any
             replaceRangeWithText(lastRange, result);
@@ -190,9 +245,10 @@
     async function runTranslationOverlay() {
         if (!lastRange || !lastSelectionText) return;
         const loader = createLoadingToast("Translating...");
+        const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
             const raw = await runAI("translate", lastSelectionText, settings.targetLang, (stage) => {
-                loader.set(`Translating • ${stage}`);
+                throttledSet(`Translating • ${stage}`);
             });
             const result = toPlainText(raw);
             loader.success("Translation ready");
@@ -218,9 +274,10 @@
         if (!codeText?.trim()) { showToast("Empty code block"); return; }
 
         const loader = createLoadingToast("Adding explainer comments...");
+        const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
             const raw = await runAI("comment_code", codeText, settings.targetLang, (stage) => {
-                loader.set(`Adding comments • ${stage}`);
+                throttledSet(`Adding comments • ${stage}`);
             });
             const result = stripMarkdownCodeFences(toPlainText(raw));
             setCodeText(codeEl, result);
@@ -356,7 +413,7 @@
         const userWantsOffline = (settings.mode !== "online-only");
         const userAllowsOnline = (settings.mode !== "offline-only");
 
-        // Detect if on-device Prompt API is present
+        // Detect if on-device APIs are present (any)
         const deviceAvailable = userWantsOffline ? await ensureOnDeviceReady() : false;
 
         if (userWantsOffline && deviceAvailable) {
@@ -432,12 +489,14 @@
                 reject(new Error("Failed to talk to page bridge"));
                 return;
             }
+            // Faster fallback in Auto mode, longer in Offline-only
+            const timeoutMs = (settings?.mode === "auto") ? 12000 : 20000;
             const timer = setTimeout(() => {
                 if (finished) return;
                 finished = true;
                 cleanup();
                 reject(new Error("On-device AI timeout"));
-            }, 20000);
+            }, timeoutMs);
         });
     }
 
@@ -492,7 +551,6 @@
         return s;
     }
 
-
     function toPlainText(out) {
         if (out == null) return "";
         if (typeof out === "string") return out;
@@ -500,6 +558,7 @@
         // Common shapes from task APIs or LLMs
         if (typeof out === "object") {
             if (typeof out.text === "string") return out.text;
+            if (typeof out.corrected === "string") return out.corrected;
             if (typeof out.correctedText === "string") return out.correctedText;
             if (typeof out.result === "string") return out.result;
             if (typeof out.output === "string") return out.output;
@@ -514,14 +573,8 @@
                     if (s) return s;
                 }
             }
-            // Fallback: stringify, but try to avoid inserting JSON blobs into the page
-            try {
-                // If it looks like {text:"..."} but we missed a key above
-                const t = JSON.stringify(out);
-                return t;
-            } catch {
-                return String(out);
-            }
+            // Fallback: stringify
+            try { return JSON.stringify(out); } catch { return String(out); }
         }
 
         return String(out);
@@ -1072,8 +1125,6 @@
 
         return { on, show, hide };
     }
-
-
 
     // Persistent loading toast helper
     function createLoadingToast(initialMessage = "Loading…") {
