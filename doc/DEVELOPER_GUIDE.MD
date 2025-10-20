@@ -1,182 +1,147 @@
 # Developer Guide
 
-This document describes the project architecture, important code paths, message contracts, configuration, and developer workflows.
+This document covers architecture, key flows, settings, message contracts, and implementation details (Reader, Library, FAB, full‑page consent, cloud‑only limit, on‑device translation).
 
-> Note: PDF integration is intentionally not documented here and should be added once the feature is stabilized.
+## Extension description (for listings)
 
-## Architecture Overview
+PageGenie augments web pages and PDFs with AI actions to reduce cognitive load, language friction, and context switching. It provides an in‑page toolbar and an optional floating button to Summarize, Explain, Rewrite, Translate, Proofread, Save Notes, and generate Quizzes. PDFs get a dedicated Reader with the same actions.
 
-The extension is composed of:
+- Problem: Reading and transforming content requires copying text into separate apps, which is slow, privacy‑unfriendly, and breaks flow. PDFs often break tooling. PageGenie keeps actions on the page, prefers on‑device AI for privacy, and unifies HTML/PDF workflows.
+- APIs used:
+    - Chrome: storage, runtime, tabs, scripting, contextMenus, webNavigation
+    - On‑device AI: Translator/Summarizer/Writer/Proofreader/Rewriter task APIs (when available), and `window.ai.createTextSession`
+    - Backend: Spring Boot REST (`/api/v1/ai`, `/api/notes`, `/api/v1/reading/*`, `/api/v1/quiz/*`)
+    - PDF: pdf.js ESM (`pdf.min.mjs`, `pdf.worker.min.mjs`) with module Worker
+    - Messaging: `window.postMessage`, Web Workers, Fetch API
+    - Storage: `chrome.storage.sync` for mode, toggles, language, auth
 
-- Content script (`content/content.js`)
-    - Manages selection toolbar and UI overlays
-    - Routes AI requests to on‑device page bridge or to the backend
-    - Persists actions (notes, logs, suggestions, quizzes) through the background
-- Page Bridge (`content/pageBridge.js`)
-    - Injected into the page context (not the isolated content world)
-    - Talks to on‑device AI:
-        - Task‑specific local APIs: `Translator`, `Summarizer`, `Proofreader`, `Rewriter`, `Writer`
-        - Prompt API: `window.ai.createTextSession` (fallback)
-    - Normalizes outputs to plain strings
-    - Communicates back to the content script via `window.postMessage`
-- Background Service Worker (`background.js`)
-    - MV3 service worker
-    - Context menus and safe chrome.tabs messaging
-    - Bridges cloud/backend calls (`/api/v1/ai`, `/api/notes`, etc.)
-    - Auth helpers (signup/login/logout), token storage/expiry handling
-- UI Pages
-    - Options/popup/quiz pages as applicable (check repository)
-- Assets (icons, CSS)
+## Architecture
 
-Data flow at a glance:
+- background.js (MV3 service worker)
+    - Context menus, open Reader/Library, background fetch for arrayBuffer, auth bridge
+- content/content.js (content world)
+    - Selection toolbar; Quick‑Fix injections; Floating Action Button (FAB)
+    - Full‑page confirmation dialog when there’s no selection
+    - AI routing (on‑device first via pageBridge, then backend)
+    - Cloud‑only input cap and operation logging
+- content/pageBridge.js (page context)
+    - On‑device AI access:
+        - Translator task API if available
+        - Fallback to `window.ai` Prompt API
+    - Robust translation: chunking + formatting preservation + progress events
+- UI pages
+    - pages/reader.html|js|css — PDF Reader (ESM pdf.js) with Action Bar
+    - pages/reading.html|js|css — Library (Notes/Suggestions/Quizzes)
+    - popup/* — Auth, settings, Reading Mode, Open Library
 
-1) User selects text → content.js shows toolbar.
-2) User picks an action → content.js sends a page message to `pageBridge.js` (on‑device first).
-3) If on‑device path fails or in online‑only mode → content.js sends a request to the backend via background.js (`PAGEGENIE_PERSIST`).
-4) Results are displayed (overlay bubble, replacement, or panel).
+## Settings (chrome.storage.sync)
 
-## Message Contracts
+- mode: `"auto" | "offline-only" | "online-only"`
+- showToolbarOnSelection: boolean
+- showFloatingButton: boolean
+- showFullPageConfirm: boolean
+- targetLang: string
+- backendUrl: string
+- apiToken: string
+- tokenExp: number (ms since epoch)
+- profileName: string
+- profileUsername: string
 
-Between content.js and pageBridge.js (window.postMessage):
-- Request: `PAGEGENIE_AI_REQUEST` `{ id, operation, text, targetLang }`
-- Response: `PAGEGENIE_AI_RESPONSE` `{ type, id, ok, result | error }`
-- Progress: `PAGEGENIE_AI_PROGRESS` `{ type, id, message }`
-- Ping: `PAGEGENIE_AI_PING` → `PAGEGENIE_AI_READY { ready: boolean }`
-- Prewarm: `PAGEGENIE_AI_PREWARM` `{ want: [...] }`
-
-Between content/background (chrome.runtime messages):
-- `PAGEGENIE_PERSIST` → background fetches backend endpoint and returns `{ ok, data | error }`
-- `PAGEGENIE_LOADING` (start/set/success/error/close) for toasts
-- `PAGEGENIE_TOAST` message
-- Auth:
-    - `PAGEGENIE_AUTH_SIGNUP`, `PAGEGENIE_AUTH_LOGIN`, `PAGEGENIE_AUTH_LOGOUT`
-- Quiz:
-    - `PAGEGENIE_OPEN_QUIZ` (opens quiz UI)
-- Concept drift:
-    - `PAGEGENIE_COMPARE_CONCEPT`
-
-## Project Structure (typical)
-
-```
-extention/
-├─ content/
-│  ├─ content.js           # UI and routing in the content world
-│  └─ pageBridge.js        # On‑device AI bridge injected into the page
-├─ background.js           # MV3 service worker
-├─ options/                # Options UI (if present)
-├─ popup/                  # Popup UI (if present)
-├─ quiz/                   # Quiz UI (if present)
-├─ icons/                  # Extension icons
-├─ manifest.json           # Chrome extension manifest (MV3)
-└─ README.md / DEVELOPER_GUIDE.md
+Recommended defaults:
+```json
+{
+  "mode": "auto",
+  "showToolbarOnSelection": true,
+  "showFloatingButton": false,
+  "showFullPageConfirm": true,
+  "targetLang": "en"
+}
 ```
 
-Note: Actual structure may vary; adjust this guide to your repository layout.
+## Full‑page confirmation
 
-## On‑device AI Paths (Preferred)
+- `ensureFullPageConsent(op, text, sourceHint)` before whole‑page processing
+- `confirmFullPageModal(...)` with “Don’t ask again” → persists `showFullPageConfirm=false`
+- Used by:
+    - `runFullDocSummarize` (non‑PDF HTML)
+    - `runSimpleOp` when strategy is `"full_html"`
+    - `runTranslationOverlay` when no selection (whole page)
 
-`pageBridge.js` attempts to use task‑specific local APIs and the Prompt API:
+## Cloud‑only input cap
 
-- Translator:
-    - `Translator.create({ sourceLanguage, targetLanguage, monitor })`
-    - `translator.translate(text)`
-    - Verbose progress (1–100%)
-- Summarizer:
-    - `Summarizer.availability()` → `Summarizer.create(opts)` → `summarize(text, { context })`
-- Proofreader:
-    - `Proofreader.create({ expectedInputLanguages, monitor })` → `proofread(input)` returns corrected string
-- Rewriter:
-    - `Rewriter.create(opts)` → `rewrite(input, { context })`
-- Writer:
-    - `Writer.availability()` → `Writer.create(opts)` → `writer.write(promptString, { context })`
-- Prompt fallback:
-    - `window.ai.createTextSession()` → `session.prompt(prompt)`
+- `CLOUD_CHAR_LIMIT` (~20k by default)
+- `applyCloudLimit(text)` in `runAIWithCloudLimit` before backend calls only
+- On‑device gets full text (no hard cap)
 
-Outputs are normalized with `ensureText()` before being returned to content.js.
+## Floating Action Button (FAB)
 
-## Backend (Optional, for cloud fallback)
+- `ensureFloatingButton` / `removeFloatingButton` and a `MutationObserver` keep‑alive so it survives SPA DOM rewrites
+- Controlled by `showFloatingButton`
+- Menu actions: summarize, explain, rewrite, translate, process full, save note, concept drift, quiz
 
-Default base URL: `http://localhost:8098`
+## Reader (PDF)
 
-Common endpoints used by content/background:
-- AI generic: `POST /api/v1/ai` `{ text, action, targetLang }`
-- Notes: `POST /api/notes` (persists saved selection)
-- Curated reading: `POST /api/v1/reading/suggest` `{ baseUrl, baseSummary }`
-- Quiz:
-    - `POST /api/v1/quiz/generate-from-text` (from selection text)
-    - `POST /api/v1/quiz/generate` (from URL)
-- Concept drift analysis: `POST /api/v1/ai/compare-concept`
-- Auth:
-    - `POST /api/v1/auth/signup`
-    - `POST /api/v1/auth/login` (returns `Authorization: Bearer <token>`)
+- ESM pdf.js packaged under `libs/pdfjs/` and listed in `web_accessible_resources`
+- Reader code:
+  ```js
+  import * as pdfjsLib from "../libs/pdfjs/pdf.min.mjs";
+  pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(
+    new URL("../libs/pdfjs/pdf.worker.min.mjs", import.meta.url),
+    { type: "module" }
+  );
+  ```
+- Fallback UI (Choose file, Drag & drop, Load URL) when `src` is missing or viewer URL can’t be resolved
+- Action Bar runs backend AI on parsed text; language dropdown; copy/download/clear
 
-The background service worker caches token/expiry in `chrome.storage.sync` and refreshes/removes on `401`.
+## Library (Hub)
 
-### Quick Backend Start (if present in this repo)
-- Java 17+ and Maven/Gradle
-- Run the Spring Boot application (e.g., `./mvnw spring-boot:run`)
-- Confirm it listens on `http://localhost:8098`
+- Fetches using `backendUrl` and `apiToken` from storage:
+    - `GET /api/v1/auth/me` → profile
+    - `GET /api/v1/quiz/attempts/recent` → attempts
+    - `GET /api/notes` → notes
+    - `GET /api/v1/reading/recent` → suggestions
+- Suggestions UI mirrors notes (title link + timestamp + actions + content card)
 
-## Settings & Storage
+## Popup
 
-Stored in `chrome.storage.sync`:
-- `mode`: `"auto" | "offline-only" | "online-only"`
-- `showToolbarOnSelection`: `boolean`
-- `targetLang`: language code
-- `backendUrl`: string
-- `apiToken`: string (Bearer token)
-- `tokenExp`: number (ms since epoch)
+- Signed‑in: Welcome {name/username}, Reading Mode, Open Library, Logout (signup hidden)
+- Signed‑out: Login + Signup
+- Settings: mode, showToolbarOnSelection, showFloatingButton, showFullPageConfirm, targetLang
 
-## Developer Workflow
+## On‑device translation (pageBridge)
 
-1. Load the extension unpacked from repo root (`chrome://extensions` → Load unpacked).
-2. Toggle modes via options (Auto / Offline‑only / Online‑only).
-3. Use DevTools:
-    - Content script logs: web page DevTools console
-    - Background logs: `chrome://extensions` → “Service Worker” inspection
-4. After file changes:
-    - Click “Reload” on your extension in `chrome://extensions`
-    - Refresh the test page
+- Prefer `Translator.create({ targetLanguage })` + `translator.translate(text)` with chunking
+- Fallback `window.ai.createTextSession()` with formatting‑preserving prompt
+- Progress events via `PAGEGENIE_AI_PROGRESS`
 
-## Coding Guidelines
+## AI routing & messaging
 
-- Use clear message types and keep request/response payloads minimal.
-- Normalize all AI outputs to plain text before inserting into the page.
-- Avoid using `chrome.*` from the page bridge (it runs in page context).
-- Prefer safe messaging helpers in background (guard invalid tab IDs).
-- Keep progress updates throttled to avoid UI jank.
+- content ↔ page (pageBridge) via postMessage:
+    - `PAGEGENIE_AI_PING/READY`, `PAGEGENIE_AI_REQUEST/RESPONSE`, `PAGEGENIE_AI_PROGRESS`, `PAGEGENIE_AI_PREWARM`
+- content ↔ background:
+    - `PAGEGENIE_PERSIST` (backend), `PAGEGENIE_OPEN_READER`, `PAGEGENIE_OPEN_QUIZ`, auth messages
 
-## Testing Checklist
+## Manifest & CSP
 
-- Selection toolbar appears on highlight; hides when selection collapses.
-- Actions:
-    - Summarize / Explain / Rewrite / Translate — via on‑device when available
-    - Quick‑Fix actions perform expected DOM edits/bubbles
-    - “Save” shows categories bubble and (optional) suggestions panel
-- Modes:
-    - Auto: on‑device first; fallback to backend when needed
-    - Offline‑only: never sends content to backend; errors if on‑device unavailable
-    - Online‑only: always uses backend
-- Auth:
-    - Signup/Login/Logout flows update token and handle expiry
-- Edge cases:
-    - Very long inputs (ensure trimming for on‑device as configured)
-    - iframes and selection changes
-    - Background reloads (extension context invalidated → refresh page)
+- `web_accessible_resources`: pages/*, libs/pdfjs/*.mjs, content/pageBridge.js
+- CSP for extension pages:
+    - `script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'`
+- Permissions:
+    - `storage`, `activeTab`, `scripting`, `contextMenus`, `tabs`, `webNavigation`
+- `host_permissions`: `<all_urls>`
 
-## Release
+## Testing checklist
 
-- Update icons, name, version in `manifest.json`
-- Verify permissions are as minimal as possible
-- Zip the extension directory and upload to the Chrome Web Store (if applicable)
+- Toolbar appears/hides correctly; actions run with/without selection
+- FAB shows, opens menu, survives SPA DOM rewrites; toggle works from popup
+- Full‑page confirmation appears; “don’t ask again” persists
+- Reader parses PDFs via ESM, shows Action Bar, handles fallback inputs
+- Library loads profile/notes/suggestions/quizzes; empty states render
+- On‑device translation works (Task API or `window.ai`); cloud fallback works with cap
+- Local file PDFs work with “Allow access to file URLs”; drag & drop works
 
-## Security & Privacy
+## Known limitations
 
-- Offline‑only mode ensures text never leaves the device
-- Use HTTPS for backend
-- Store tokens in `chrome.storage.sync`; clear on logout or 401
-
-## Pending
-
-- PDF integration and documentation will be added once stable
-- Additional performance optimizations and telemetry (optional)
+- Restricted pages (Chrome Web Store, `chrome://*`, built‑in PDF viewer) block content scripts
+- Some viewer tabs don’t expose original PDF URL; use Reader fallback inputs
+- Backend routes may differ; adjust `pages/reading.js` accordingly
