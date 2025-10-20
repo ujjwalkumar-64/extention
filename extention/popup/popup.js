@@ -25,6 +25,7 @@
 
     const modeSel = $("mode");
     const toggleSelection = $("toggleSelection");
+    const toggleFloatingButton = $("toggleFloatingButton"); // NEW
     const targetLangSel = $("targetLang");
 
     function setStatus(msg, cls = "") {
@@ -61,6 +62,7 @@
             const cfg = await getSync({
                 mode: "auto",
                 showToolbarOnSelection: true,
+                showFloatingButton: false, // NEW default
                 targetLang: "en",
                 apiToken: "",
                 tokenExp: 0,
@@ -70,6 +72,7 @@
 
             modeSel.value = cfg.mode || "auto";
             toggleSelection.checked = !!cfg.showToolbarOnSelection;
+            toggleFloatingButton.checked = !!cfg.showFloatingButton; // NEW
             targetLangSel.value = cfg.targetLang || "en";
 
             const tokenValid = !!cfg.apiToken && (!cfg.tokenExp || Date.now() < Number(cfg.tokenExp));
@@ -94,11 +97,28 @@
         setStatus("Selection toolbar setting updated", "ok");
         setTimeout(() => setStatus(""), 900);
     });
+    // NEW: Floating button toggle
+    toggleFloatingButton.addEventListener("change", async () => {
+        await setSync({ showFloatingButton: toggleFloatingButton.checked });
+        setStatus(toggleFloatingButton.checked ? "Floating button enabled" : "Floating button disabled", "ok");
+        setTimeout(() => setStatus(""), 900);
+    });
     targetLangSel.addEventListener("change", async () => {
         await setSync({ targetLang: targetLangSel.value });
         setStatus("Target language updated", "ok");
         setTimeout(() => setStatus(""), 900);
     });
+    // Load default with existing settings
+    const toggleFullPageConfirm = document.getElementById("toggleFullPageConfirm");
+
+
+    (async function initPopupConfirm() {
+        const cfg = await getSync({ showFullPageConfirm: true });
+        if (toggleFullPageConfirm) toggleFullPageConfirm.checked = !!cfg.showFullPageConfirm;
+        toggleFullPageConfirm?.addEventListener("change", async () => {
+            await setSync({ showFullPageConfirm: toggleFullPageConfirm.checked });
+        });
+    })();
 
     // Log in
     loginForm.addEventListener("submit", async (e) => {
@@ -165,10 +185,8 @@
             });
             if (!resp?.ok) throw new Error(resp?.error || "Signup failed");
 
-            // Persist profile name/username locally
             await setSync({ profileName: fullName, profileUsername: username });
 
-            // Attempt auto-login
             const loginResp = await new Promise((resolve) => {
                 chrome.runtime.sendMessage(
                     { type: "PAGEGENIE_AUTH_LOGIN", username, password },
@@ -211,7 +229,6 @@
             });
             if (!resp?.ok) throw new Error(resp?.error || "Logout failed");
             setSignedOutUI();
-            // Re-enable signup UI after logout
             signupWrap.hidden = false;
             setStatus("Signed out", "ok");
             setTimeout(() => setStatus(""), 900);
@@ -220,7 +237,7 @@
         }
     });
 
-    // Open Reading Mode (PDF Reader page)
+    // Open Reading Mode
     readingModeBtn.addEventListener("click", async () => {
         try {
             await new Promise((resolve) => {
@@ -233,7 +250,7 @@
         }
     });
 
-    // Open Library (notes/suggestions/quizzes hub)
+    // Open Library
     openHubBtn.addEventListener("click", () => {
         const url = chrome.runtime.getURL("pages/reading.html");
         window.open(url, "_blank");

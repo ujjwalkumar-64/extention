@@ -1,8 +1,9 @@
-// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save, Process Full Doc)
+// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save)
 // - Quick-Fix DOM Injection (Replace with Proofread, Translation Overlay, Insert Code Comments)
 // - Offline (on-device) AI via pageBridge + Online fallback via Spring Boot (/api/v1/ai)
 // - Save Note shows Categories bubble + Curated Reading side panel
 // - Robust background messaging with "extension context invalidated" guard
+// - Floating Action Button (FAB): always-visible button with vertical menu; toggle from popup (showFloatingButton)
 
 (function init() {
     // Inject the page-bridge to access on-device AI APIs from page context (window.ai / Prompt API)
@@ -71,24 +72,44 @@
         return onDeviceReady;
     }
 
-    // Settings state
     let settings = {
         mode: "auto", // "auto" | "offline-only" | "online-only"
         showToolbarOnSelection: true,
+        showFloatingButton: false,
+        showFullPageConfirm: true,
         targetLang: "en"
     };
 
     chrome.storage.sync.get(
-        { mode: "auto", showToolbarOnSelection: true, targetLang: "en" },
-        s => (settings = { ...settings, ...s })
+        { mode: "auto", showToolbarOnSelection: true, showFloatingButton: false, showFullPageConfirm: true, targetLang: "en" },
+        s => {
+            settings = { ...settings, ...s };
+
+            // Safety: if storage returns a non-boolean (or missing), force default true
+            if (typeof settings.showFullPageConfirm !== "boolean") {
+                settings.showFullPageConfirm = true;
+            }
+
+            // If offline-only mode is enabled, try to prewarm as soon as possible
+            if (settings.mode === "offline-only") {
+                prewarmLikely();
+            }
+            if (settings.showFloatingButton) {
+                ensureFloatingButton();
+            }
+        }
     );
 
     chrome.storage.onChanged.addListener((changes, area) => {
-        if (area === "sync") {
-            if (changes.mode) settings.mode = changes.mode.newValue;
-            if (changes.showToolbarOnSelection) settings.showToolbarOnSelection = changes.showToolbarOnSelection.newValue;
-            if (changes.targetLang) settings.targetLang = changes.targetLang.newValue;
+        if (area !== "sync") return;
+        if (changes.mode) settings.mode = changes.mode.newValue;
+        if (changes.showToolbarOnSelection) settings.showToolbarOnSelection = changes.showToolbarOnSelection.newValue;
+        if (changes.showFloatingButton) {
+            settings.showFloatingButton = !!changes.showFloatingButton.newValue;
+            if (settings.showFloatingButton) ensureFloatingButton(); else removeFloatingButton();
         }
+        if (changes.showFullPageConfirm) settings.showFullPageConfirm = !!changes.showFullPageConfirm.newValue; // NEW
+        if (changes.targetLang) settings.targetLang = changes.targetLang.newValue;
     });
 
     // Selection toolbar
@@ -131,11 +152,6 @@
             if (!sel || sel.isCollapsed) toolbar.hide();
         }, 50);
     });
-
-    // If offline-only mode is enabled, try to prewarm as soon as possible
-    if (settings.mode === "offline-only") {
-        prewarmLikely();
-    }
 
     // Handle context menu relay and toasts from background + background-driven loaders
     chrome.runtime.onMessage.addListener((msg) => {
@@ -184,7 +200,6 @@
     toolbar.on("explain", () => runSimpleOp("explain"));
     toolbar.on("rewrite", () => runSimpleOp("rewrite"));
     toolbar.on("translate", () => runTranslationOverlay());
-    toolbar.on("process_full", () => runFullDocSummarize());
     toolbar.on("save", () => saveNote());
     toolbar.on("compare_concept", () => compareConceptDrift());
     toolbar.on("quiz_selection", () => quizSelectedText());
@@ -193,9 +208,7 @@
     toolbar.on("quick_overlay", () => runTranslationOverlay());
     toolbar.on("quick_comment", () => insertCodeComments());
 
-
-
-// Unified active text resolver (no in-page PDF parsing anymore)
+    // Unified active text resolver (no in-page PDF parsing anymore)
     async function getActiveText({ fullDoc = false } = {}) {
         // 1) Prefer DOM selection
         const sel = document.getSelection();
@@ -212,6 +225,16 @@
         // 3) Default: whole page text
         return { text: getWholePageText(), strategy: "full_html" };
     }
+
+    // CLOUD LIMIT (applies only when sending to backend)
+    const CLOUD_CHAR_LIMIT = 20000; // adjust as desired
+
+    function applyCloudLimit(text) {
+        if (!text || text.length <= CLOUD_CHAR_LIMIT) return text;
+        const suffix = `\n\n[truncated to ${CLOUD_CHAR_LIMIT.toLocaleString()} of ${text.length.toLocaleString()} chars for cloud processing]`;
+        return text.slice(0, CLOUD_CHAR_LIMIT) + suffix;
+    }
+
 
     function getWholePageText() {
         const body = document.body;
@@ -236,7 +259,8 @@
         return text;
     }
 
-// Helper: heuristic to decide “this tab looks like a PDF page”
+
+    // Helper: heuristic to decide “this tab looks like a PDF page”
     function looksLikePdfPage() {
         try { if (document.contentType === "application/pdf") return true; } catch {}
         const href = location?.href || "";
@@ -248,7 +272,7 @@
         return false;
     }
 
-// Process full document → route PDFs to Reader page, otherwise summarize HTML in-place
+//   runFullDocSummarize — ask for consent if there’s no selection; do not pre-trim for device
     async function runFullDocSummarize() {
         const loader = createLoadingToast("Processing full document");
         const throttledSet = throttle(loader.set.bind(loader), 120);
@@ -256,73 +280,55 @@
         try {
             if (looksLikePdfPage()) {
                 throttledSet("Opening Reader for PDF…");
-                // Ask background to open Reader. It will resolve the actual PDF URL.
-                chrome.runtime.sendMessage(
-                    { type: "PAGEGENIE_OPEN_READER", op: "summarize_full", src: location.href },
-                    () => { /* ignore lastError; Reader opens in a new tab */ }
-                );
+                chrome.runtime.sendMessage({ type: "PAGEGENIE_OPEN_READER", op: "summarize_full", src: location.href }, () => {});
                 loader.success("Reader opened");
                 return;
             }
 
-            // HTML path: summarize full page text locally/online using existing flow
             const active = await getActiveText({ fullDoc: true });
             if (!active.text) throw new Error("No text found in document");
 
-            const inputText = (settings.mode !== "online-only")
-                ? trimForLocal("summarize", active.text, 16000)
-                : active.text;
+            // Confirm full page
+            const ok = await ensureFullPageConsent("summarize", active.text, "whole page");
+            if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
 
-            const raw = await runAI("summarize", inputText, settings.targetLang, (stage) => {
-                throttledSet(`Summary • ${stage}`);
-            });
-            const result = toPlainText(raw);
+            // No device pre-trim; enforce cloud limit only if we end up using cloud
+            const resultText = await runAIWithCloudLimit("summarize", active.text, throttledSet);
             loader.success("Summary ready");
-            showResultPanel(result);
+            showResultPanel(resultText);
             persist("/api/ops/log", {
-                type: "summarize_full_doc",
-                source: location.href,
-                input_len: active.text.length,
-                output: result,
-                strategy: active.strategy,
-                ts: Date.now()
+                type: "summarize_full_doc", source: location.href, input_len: active.text.length, output: resultText, strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
         }
     }
 
-    // Simple result operations (non-injection)
+
+    //  runSimpleOp — if it falls back to full page (no selection), ask consent; no device pre-trim; cloud-only limit
     async function runSimpleOp(op) {
         const loader = createLoadingToast("Preparing " + opTitle(op));
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
             const active = await getActiveText({ fullDoc: false });
             if (!active.text) throw new Error("No text found to process");
-            const inputText = (settings.mode !== "online-only")
-                ? trimForLocal(op, active.text)
-                : active.text;
 
-            const raw = await runAI(op, inputText, settings.targetLang, (stage) => {
-                throttledSet(`${opTitle(op)} • ${stage}`);
-            });
-            const result = toPlainText(raw);
+            if (active.strategy === "full_html") {
+                const ok = await ensureFullPageConsent(op, active.text, "whole page");
+                if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
+            }
+
+            const resultText = await runAIWithCloudLimit(op, active.text, (stage) => throttledSet(`${opTitle(op)} • ${stage}`));
             loader.success(opTitle(op) + " ready");
-
-            // If selection strategy, show panel as usual
-            showResultPanel(result);
+            showResultPanel(resultText);
             persist("/api/ops/log", {
-                type: op,
-                source: location.href,
-                input: active.text.slice(0, 2000), // avoid overlogging
-                output: result,
-                strategy: active.strategy,
-                ts: Date.now()
+                type: op, source: location.href, input: active.text.slice(0, 2000), output: resultText, strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
         }
     }
+
 
     // Quick-Fix: Replace selection with proofread text
     async function replaceWithProofread() {
@@ -361,7 +367,13 @@
             const active = await getActiveText({ fullDoc: false });
             if (!active.text) throw new Error("No text found to translate");
 
-            const raw = await runAI("translate", active.text, settings.targetLang, (stage) => {
+            // NEW: confirm when we're about to translate the entire page
+            if (active.strategy === "full_html") {
+                const ok = await ensureFullPageConsent("translate", active.text, "whole page");
+                if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
+            }
+
+            const raw = await runAIWithCloudLimit("translate", active.text, (stage) => {
                 throttledSet(`Translating • ${stage}`);
             });
             const result = toPlainText(raw);
@@ -387,7 +399,6 @@
             loader.error("AI error: " + (e?.message || e));
         }
     }
-
     // Quick-Fix: Insert code comments in nearest code block
     async function insertCodeComments() {
         const codeEl = findNearestCodeBlock(getSelectionAnchorNode());
@@ -532,6 +543,36 @@
         } catch (e) {
             loader.error(e?.message || String(e));
         }
+    }
+
+    //   Route that avoids device trimming and enforces cloud-only limit automatically
+    async function runAIWithCloudLimit(op, text, progressCb) {
+        const onProgress = (m) => { try { progressCb?.(m); } catch {} };
+
+        // Try on-device first (no limit)
+        const userWantsOffline = (settings.mode !== "online-only");
+        const userAllowsOnline = (settings.mode !== "offline-only");
+        const deviceAvailable = userWantsOffline ? await ensureOnDeviceReady() : false;
+
+        if (userWantsOffline && deviceAvailable) {
+            try {
+                onProgress("Using on-device AI");
+                const res = await aiOnDevice(op, text, settings.targetLang, onProgress);
+                const plain = toPlainText(res);
+                if (plain) return plain;
+            } catch {
+                // fall through to cloud
+            }
+        }
+
+        if (!userAllowsOnline) {
+            throw new Error("On-device AI unavailable.");
+        }
+
+        onProgress(deviceAvailable ? "Falling back to cloud AI" : "Using cloud AI");
+        const trimmedForCloud = applyCloudLimit(text); // enforce cloud-only cap
+        const cloudRes = await aiOnline(op, trimmedForCloud, settings.targetLang);
+        return toPlainText(cloudRes);
     }
 
     // AI routing: offline → online (or per settings), with per-op availability
@@ -1197,14 +1238,12 @@
             { id: "explain", label: "💬 Explain" },
             { id: "rewrite", label: "🪄 Rewrite" },
             { id: "translate", label: "🌍 Translate" },
-            { id: "process_full", label: "📄 Process Full Doc" },
             { id: "sep", label: "|" },
             { id: "save", label: "📘 Save" },
             { id: "compare_concept", label: "🔗 Analyze Concept Drift" },
             { id: "quiz_selection", label: "🧠 Quiz Me" },
             { id: "sep", label: "|" },
             { id: "quick_proof", label: "⚡ Replace with Proofread" },
-            { id: "quick_overlay", label: "⚡ Translation Overlay" },
             { id: "quick_comment", label: "⚡ Insert Code Comments" }
         ];
 
@@ -1317,6 +1356,236 @@
         }
         return { set, success, error, close };
     }
+
+    // Floating Action Button (FAB) — always-visible toggleable menu (controlled by showFloatingButton)
+    let __pg_fab_root = null;
+    let __pg_fab_menu_open = false;
+    let __pg_fab_observer = null;
+
+    function ensureFloatingButton() {
+        // Only in top frame to avoid duplicates
+        try { if (window.top !== window.self) return; } catch {}
+
+        if (__pg_fab_root && document.documentElement.contains(__pg_fab_root)) return;
+
+        const root = document.createElement("div");
+        root.id = "pagegenie-fab";
+        Object.assign(root.style, {
+            position: "fixed",
+            right: "16px",
+            bottom: "16px",
+            zIndex: "2147483647",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: "8px",
+            pointerEvents: "none"
+        });
+
+        // Vertical menu container
+        const menu = document.createElement("div");
+        menu.id = "pagegenie-fab-menu";
+        Object.assign(menu.style, {
+            display: "none",
+            flexDirection: "column",
+            gap: "6px",
+            paddingBottom: "4px",
+            pointerEvents: "auto"
+        });
+
+        const btn = document.createElement("button");
+        btn.id = "pagegenie-fab-btn";
+        btn.title = "PageGenie";
+        btn.setAttribute("aria-label", "PageGenie menu");
+        Object.assign(btn.style, {
+            pointerEvents: "auto",
+            width: "52px",
+            height: "52px",
+            borderRadius: "50%",
+            border: "1px solid rgba(255,255,255,0.18)",
+            background: "linear-gradient(135deg, #1b1f2a 0%, #0f141c 100%)",
+            color: "#fff",
+            boxShadow: "0 10px 24px rgba(0,0,0,0.35)",
+            cursor: "pointer",
+            fontSize: "22px"
+        });
+        btn.textContent = "🧞";
+
+        function mbtn(label, onClick) {
+            const b = document.createElement("button");
+            b.className = "pagegenie-fab-item";
+            b.textContent = label;
+            Object.assign(b.style, {
+                background: "rgba(20,20,20,0.98)",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.14)",
+                padding: "8px 10px",
+                borderRadius: "8px",
+                cursor: "pointer",
+                fontSize: "13px",
+                minWidth: "200px",
+                textAlign: "left",
+                boxShadow: "0 8px 20px rgba(0,0,0,0.3)"
+            });
+            b.addEventListener("mouseenter", () => (b.style.background = "rgba(28,28,28,0.98)"));
+            b.addEventListener("mouseleave", () => (b.style.background = "rgba(20,20,20,0.98)"));
+            b.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                try { onClick(); } catch {}
+                toggleMenu(false);
+            });
+            return b;
+        }
+
+        // Build menu items (reusing the same handlers)
+        menu.append(
+            mbtn("✨ Summarize", () => runSimpleOp("summarize")),
+            mbtn("💬 Explain", () => runSimpleOp("explain")),
+            mbtn("🪄 Rewrite", () => runSimpleOp("rewrite")),
+            mbtn("🌍 Translate", () => runTranslationOverlay()),
+            mbtn("📄 Process Full Document", () => runFullDocSummarize()),
+            mbtn("📘 Save Note", () => saveNote()),
+            mbtn("🔗 Analyze Concept Drift", () => compareConceptDrift()),
+            mbtn("🧠 Quiz Me", () => quizSelectedText()
+            )
+        )
+
+
+        function toggleMenu(open) {
+            __pg_fab_menu_open = open ?? !__pg_fab_menu_open;
+            menu.style.display = __pg_fab_menu_open ? "flex" : "none";
+        }
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleMenu();
+        });
+
+        function onDocClick(e) {
+            if (!__pg_fab_menu_open) return;
+            if (!root.contains(e.target)) toggleMenu(false);
+        }
+        function onKeyDown(e) {
+            if (__pg_fab_menu_open && e.key === "Escape") toggleMenu(false);
+        }
+        document.addEventListener("click", onDocClick, true);
+        document.addEventListener("keydown", onKeyDown, true);
+
+        root.append(menu, btn);
+        document.documentElement.appendChild(root);
+
+        __pg_fab_root = root;
+        __pg_fab_root.__pg_cleanup = () => {
+            document.removeEventListener("click", onDocClick, true);
+            document.removeEventListener("keydown", onKeyDown, true);
+        };
+
+        // Keep-alive — if sites rewrite DOM, recreate FAB while enabled
+        try {
+            if (__pg_fab_observer) __pg_fab_observer.disconnect();
+            __pg_fab_observer = new MutationObserver(() => {
+                if (!settings.showFloatingButton) return;
+                if (!document.documentElement.contains(__pg_fab_root)) {
+                    __pg_fab_root = null;
+                    ensureFloatingButton();
+                }
+            });
+            __pg_fab_observer.observe(document.documentElement, { childList: true });
+        } catch {}
+    }
+
+    function removeFloatingButton() {
+        if (__pg_fab_observer) {
+            try { __pg_fab_observer.disconnect(); } catch {}
+            __pg_fab_observer = null;
+        }
+        if (__pg_fab_root) {
+            try { __pg_fab_root.__pg_cleanup?.(); } catch {}
+            try { __pg_fab_root.remove(); } catch {}
+            __pg_fab_root = null;
+            __pg_fab_menu_open = false;
+        }
+    }
+
+    // Helper: confirm before full-page processing when there is no selection
+    async function ensureFullPageConsent(op, text, sourceHint = "whole page") {
+        if (!settings.showFullPageConfirm) return true;
+        const count = (text || "").length;
+        return await confirmFullPageModal(op, count, sourceHint);
+    }
+
+    // NEW: Minimal confirmation modal (returns Promise<boolean>)
+    function confirmFullPageModal(op, charCount, sourceHint) {
+        return new Promise((resolve) => {
+            const root = document.createElement("div");
+            Object.assign(root.style, {
+                position: "fixed", inset: "0", background: "rgba(0,0,0,0.45)", zIndex: "2147483647",
+                display: "flex", alignItems: "center", justifyContent: "center"
+            });
+
+            const card = document.createElement("div");
+            Object.assign(card.style, {
+                background: "#0f1115", color: "#e8eaf0", border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: "10px", width: "min(520px, 90vw)", padding: "16px 18px", boxShadow: "0 12px 36px rgba(0,0,0,0.4)",
+                fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+            });
+
+            const title = document.createElement("div");
+            title.textContent = "Process full page?";
+            Object.assign(title.style, { fontWeight: "800", marginBottom: "6px" });
+
+            const msg = document.createElement("div");
+            msg.innerHTML = `You’re about to run <b>${escapeHtml(opTitle(op))}</b> on the ${escapeHtml(sourceHint)}.<br/>Estimated size: <b>${charCount.toLocaleString()}</b> characters.`;
+            Object.assign(msg.style, { color: "#cbd5e1", fontSize: "13px", marginBottom: "10px" });
+
+            const dontAskWrap = document.createElement("label");
+            const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "pg-dontask";
+            const txt = document.createElement("span"); txt.textContent = " Don’t ask again for full-page actions";
+            dontAskWrap.append(cb, txt);
+            Object.assign(dontAskWrap.style, { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#9aa3b2" });
+
+            const row = document.createElement("div");
+            Object.assign(row.style, { display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
+
+            const cancel = document.createElement("button");
+            cancel.textContent = "Cancel";
+            styleBtn(cancel, "ghost");
+
+            const proceed = document.createElement("button");
+            proceed.textContent = "Process";
+            styleBtn(proceed, "primary");
+
+            cancel.onclick = () => { cleanup(false); };
+            proceed.onclick = async () => {
+                if (cb.checked) {
+                    try { await chrome.storage.sync.set({ showFullPageConfirm: false }); settings.showFullPageConfirm = false; } catch {}
+                }
+                cleanup(true);
+            };
+
+            row.append(cancel, proceed);
+            card.append(title, msg, dontAskWrap, row);
+            root.append(card);
+            document.documentElement.append(root);
+
+            function cleanup(ok) {
+                try { root.remove(); } catch {}
+                resolve(!!ok);
+            }
+            function styleBtn(b, kind) {
+                Object.assign(b.style, {
+                    background: kind === "primary" ? "#155e75" : "#1b1b1b",
+                    color: "#fff", border: "1px solid rgba(255,255,255,0.18)", padding: "6px 10px",
+                    borderRadius: "8px", cursor: "pointer", fontSize: "13px"
+                });
+                b.onmouseenter = () => b.style.background = (kind === "primary" ? "#1b6b85" : "#242424");
+                b.onmouseleave = () => b.style.background = (kind === "primary" ? "#155e75" : "#1b1b1b");
+            }
+        });
+    }
+
+
 
     // Dev/test hooks
     window.__pg_showSuggestions = function(example) {
