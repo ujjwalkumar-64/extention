@@ -1,92 +1,128 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-    <meta charset="utf-8">
+    <meta charset="utf-8" />
     <title>PageGenie</title>
-    <style>
-        body { font: 14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; width: 320px; }
-        .row { margin-bottom: 10px; }
-        label { display: flex; align-items: center; gap: 8px; }
-        select, input[type="checkbox"], input[type="text"], input[type="password"] { font: inherit; width: 100%; box-sizing: border-box; }
-        .hint { color: #666; font-size: 12px; }
-        .section { border-top: 1px solid #eee; padding-top: 10px; margin-top: 10px; }
-        .status-ok { color: #0a0; }
-        .status-err { color: #a00; }
-        .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
-        button { padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
-        button.primary { background:#111; color:#fff; border-color:#111; }
-        .muted { color: #444; font-size: 12px; }
-        .hidden { display: none; }
-    </style>
+    <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-<h3>PageGenie</h3>
+<div id="app">
+    <header class="pg-header">
+        <div class="pg-title">PageGenie</div>
+        <div id="authBadge" class="pg-badge">Signed out</div>
+    </header>
 
-<div class="row">
-    <label>
-        Mode:
-        <select id="mode">
-            <option value="auto">Auto (Offline → Online)</option>
-            <option value="offline-only">Offline only</option>
-            <option value="online-only">Online only</option>
-        </select>
-    </label>
-</div>
+    <div id="status" class="pg-status" hidden></div>
 
-<div class="row">
-    <label>
-        <input type="checkbox" id="toolbar" />
-        Show toolbar on selection
-    </label>
-</div>
+    <!-- Auth: Signed-out -->
+    <section id="authAnon" class="card">
+        <div class="section-title">Sign in</div>
+        <form id="loginForm" class="form-grid">
+            <label>
+                <span class="lbl">Username</span>
+                <input id="loginUsername" type="text" autocomplete="username" required />
+            </label>
+            <label>
+                <span class="lbl">Password</span>
+                <input id="loginPassword" type="password" autocomplete="current-password" required />
+            </label>
+            <button id="loginBtn" type="submit" class="pg-btn primary">Log in</button>
+        </form>
 
-<div class="row">
-    <label>
-        Target language:
-        <select id="lang">
-            <option value="en">English (en)</option>
-            <option value="es">Spanish (es)</option>
-            <option value="fr">French (fr)</option>
-            <option value="de">German (de)</option>
-            <option value="hi">Hindi (hi)</option>
-            <option value="ja">Japanese (ja)</option>
-            <option value="zh">Chinese (zh)</option>
-        </select>
-    </label>
-</div>
+        <div class="divider"><span>or</span></div>
 
-<div class="section">
-    <strong>Login</strong>
-    <div id="authForm">
+        <div id="signupWrap">
+            <div class="section-title">Create an account</div>
+            <form id="signupForm" class="form-grid">
+                <label>
+                    <span class="lbl">Full name</span>
+                    <input id="signupFullName" type="text" autocomplete="name" required />
+                </label>
+                <label>
+                    <span class="lbl">Username</span>
+                    <input id="signupUsername" type="text" autocomplete="username" required />
+                </label>
+                <label>
+                    <span class="lbl">Password</span>
+                    <input id="signupPassword" type="password" autocomplete="new-password" required />
+                </label>
+                <button id="signupBtn" type="submit" class="pg-btn">Sign up</button>
+            </form>
+        </div>
+    </section>
+
+    <!-- Auth: Signed-in -->
+    <section id="authUser" class="card" hidden>
+        <div class="section-title">Account</div>
         <div class="row">
-            <input type="text" id="username" placeholder="Username" autocomplete="username" />
+            <div id="welcome" class="welcome">Welcome!</div>
         </div>
-        <div class="row">
-            <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
+        <div class="row gap">
+            <button id="readingModeBtn" class="pg-btn">Open Reading Mode</button>
+            <button id="openHubBtn" class="pg-btn">Open Library</button>
+            <button id="logoutBtn" class="pg-btn danger">Log out</button>
         </div>
-        <div class="row hidden" id="signupExtra">
-            <input type="text" id="fullName" placeholder="Full name (for Sign up)" />
-        </div>
-        <div class="btn-row">
-            <button id="login" class="primary">Log In</button>
-            <button id="signup">Sign Up</button>
-            <button id="toggleSignup" type="button">Toggle Sign Up</button>
-            <button id="logout">Log Out</button>
-        </div>
-        <div id="authStatus" class="hint"></div>
-        <div class="hint">Backend URL is configured in Options. Token is read from the Authorization response header.</div>
-    </div>
+    </section>
 
-    <div id="profileBlock" class="row hidden">
-        <div id="who" class="muted">Signed in as ...</div>
-        <div class="btn-row" style="margin-top:6px">
-            <button id="readingMode" class="primary">Reading Mode</button>
-        </div>
-    </div>
-</div>
+    <!-- Settings -->
+    <section class="card">
+        <div class="section-title">Settings</div>
+        <div class="settings-grid">
+            <label class="w100">
+                <span class="lbl">Mode</span>
+                <select id="mode" class="pg-select">
+                    <option value="auto">Auto (prefer on-device, fallback online)</option>
+                    <option value="offline-only">Offline only (on-device required)</option>
+                    <option value="online-only">Online only (always use backend)</option>
+                </select>
+            </label>
 
-<div class="row hint">
-    Offline uses on-device AI when available. Online uses your Spring Boot backend.
+            <label class="toggle">
+                <input id="toggleSelection" type="checkbox" />
+                <span>Show toolbar on selection</span>
+            </label>
+
+            <label class="w100">
+                <span class="lbl">Target language</span>
+                <select id="targetLang" class="pg-select">
+                    <option value="en">English (en)</option>
+                    <option value="hi">Hindi (hi)</option>
+                    <option value="es">Spanish (es)</option>
+                    <option value="fr">French (fr)</option>
+                    <option value="de">German (de)</option>
+                    <option value="zh">Chinese (zh)</option>
+                    <option value="ja">Japanese (ja)</option>
+                    <option value="ko">Korean (ko)</option>
+                    <option value="pt">Portuguese (pt)</option>
+                    <option value="ru">Russian (ru)</option>
+                    <option value="ar">Arabic (ar)</option>
+                    <option value="it">Italian (it)</option>
+                    <option value="bn">Bengali (bn)</option>
+                    <option value="pa">Punjabi (pa)</option>
+                    <option value="mr">Marathi (mr)</option>
+                    <option value="te">Telugu (te)</option>
+                    <option value="ta">Tamil (ta)</option>
+                    <option value="ur">Urdu (ur)</option>
+                    <option value="gu">Gujarati (gu)</option>
+                </select>
+            </label>
+        </div>
+    </section>
+
+    <!-- About -->
+    <section class="card">
+        <div class="section-title">About PageGenie</div>
+        <p class="muted">
+            PageGenie brings AI-powered reading and writing tools to any web page. It prefers fast, private
+            on-device AI when available and seamlessly falls back to your backend for advanced features.
+        </p>
+        <ul class="muted">
+            <li>Selection toolbar: Summarize, Explain, Rewrite, Translate, Save</li>
+            <li>Quick fixes: Proofread replacement, Translation overlay, Insert code comments</li>
+            <li>Modes: Auto, Offline only, Online only</li>
+            <li>“Quiz Me” and Curated Reading via backend</li>
+        </ul>
+    </section>
 </div>
 
 <script src="popup.js"></script>

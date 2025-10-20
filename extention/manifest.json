@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "PageGenie",
   "version": "1.0.0",
-  "description": "Selection AI tools for web pages and PDFs with on-device AI first.",
+  "description": "AI tools for any web page.",
   "action": {
     "default_title": "PageGenie",
     "default_popup": "popup/popup.html"
@@ -16,8 +16,6 @@
     "webNavigation"
   ],
   "host_permissions": [
-    "http://localhost:8098/*",
-    "https://localhost:8098/*",
     "<all_urls>"
   ],
   "background": {
@@ -35,7 +33,7 @@
       "css": [
         "content/toolbar.css"
       ],
-      "run_at": "document_end",
+      "run_at": "document_idle",
       "all_frames": true
     }
   ],
@@ -43,11 +41,15 @@
     {
       "resources": [
         "content/pageBridge.js",
-        "libs/pdfjs/pdf.min.mjs",
-        "libs/pdfjs/pdf.worker.min.mjs",
         "pages/reader.html",
         "pages/reader.js",
-        "pages/reader.css"
+        "pages/reader.css",
+        "pages/reading.html",
+        "pages/reading.js",
+        "pages/reading.css",
+        "libs/pdfjs/pdf.min.mjs",
+        "libs/pdfjs/pdf.worker.min.mjs",
+        "quiz/quiz.html"
       ],
       "matches": ["<all_urls>"],
       "use_dynamic_url": true
@@ -55,8 +57,8 @@
   ],
 
   "options_ui": {
-    "page": "options/options.html",
-    "open_in_tab": false
+    "page": "options/options.html"
+
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"

@@ -1,217 +1,244 @@
-document.addEventListener("DOMContentLoaded", async () => {
-    const modeSel = document.getElementById("mode");
-    const toolbarChk = document.getElementById("toolbar");
-    const langSel = document.getElementById("lang");
+(function () {
+    const $ = (id) => document.getElementById(id);
+    const authBadge = $("authBadge");
+    const statusEl = $("status");
 
-    const usernameEl = document.getElementById("username");
-    const passwordEl = document.getElementById("password");
-    const fullNameEl = document.getElementById("fullName");
-    const signupExtra = document.getElementById("signupExtra");
+    const authAnon = $("authAnon");
+    const authUser = $("authUser");
+    const welcome = $("welcome");
 
-    const loginBtn = document.getElementById("login");
-    const signupBtn = document.getElementById("signup");
-    const toggleSignupBtn = document.getElementById("toggleSignup");
-    const logoutBtn = document.getElementById("logout");
-    const readingBtn = document.getElementById("readingMode");
-    const authStatus = document.getElementById("authStatus");
+    const loginForm = $("loginForm");
+    const loginUsername = $("loginUsername");
+    const loginPassword = $("loginPassword");
+    const loginBtn = $("loginBtn");
 
-    const profileBlock = document.getElementById("profileBlock");
-    const whoEl = document.getElementById("who");
+    const signupWrap = $("signupWrap");
+    const signupForm = $("signupForm");
+    const signupFullName = $("signupFullName");
+    const signupUsername = $("signupUsername");
+    const signupPassword = $("signupPassword");
+    const signupBtn = $("signupBtn");
 
-    const st = await chrome.storage.sync.get({
-        mode: "auto",
-        showToolbarOnSelection: true,
-        targetLang: "en",
-        apiToken: "",
-        tokenExp: 0,
-        backendUrl: ""
-    });
+    const logoutBtn = $("logoutBtn");
+    const readingModeBtn = $("readingModeBtn");
+    const openHubBtn = $("openHubBtn");
 
-    modeSel.value = st.mode;
-    toolbarChk.checked = st.showToolbarOnSelection;
-    langSel.value = st.targetLang;
+    const modeSel = $("mode");
+    const toggleSelection = $("toggleSelection");
+    const targetLangSel = $("targetLang");
 
-    modeSel.addEventListener("change", () => chrome.storage.sync.set({ mode: modeSel.value }));
-    toolbarChk.addEventListener("change", () => chrome.storage.sync.set({ showToolbarOnSelection: toolbarChk.checked }));
-    langSel.addEventListener("change", () => chrome.storage.sync.set({ targetLang: langSel.value }));
-
-    // UI helpers
-    function setStatus(text, ok = null) {
-        authStatus.textContent = text || "";
-        authStatus.className = "hint " + (ok === true ? "status-ok" : ok === false ? "status-err" : "");
-    }
-    function showProfile(fullName, username) {
-        whoEl.textContent = `${fullName || username} (@${username})`;
-        profileBlock.classList.remove("hidden");
-    }
-    function hideProfile() {
-        profileBlock.classList.add("hidden");
-        whoEl.textContent = "";
-    }
-    function isLoggedIn() {
-        const now = Date.now();
-        return Boolean(st.apiToken && st.tokenExp && now < st.tokenExp);
+    function setStatus(msg, cls = "") {
+        if (!msg) { statusEl.hidden = true; statusEl.textContent = ""; statusEl.className = "pg-status"; return; }
+        statusEl.hidden = false;
+        statusEl.textContent = msg;
+        statusEl.className = "pg-status " + cls;
     }
 
-    async function refreshMe() {
+    async function getSync(keys) {
+        return new Promise((resolve) => chrome.storage.sync.get(keys, resolve));
+    }
+    async function setSync(obj) {
+        return new Promise((resolve) => chrome.storage.sync.set(obj, resolve));
+    }
+
+    function setSignedInUI({ name, username }) {
+        authBadge.textContent = "Signed in";
+        authAnon.hidden = true;
+        authUser.hidden = false;
+        const nm = name || username || "there";
+        welcome.textContent = `Welcome, ${nm}!`;
+    }
+    function setSignedOutUI() {
+        authBadge.textContent = "Signed out";
+        authAnon.hidden = false;
+        authUser.hidden = true;
+        welcome.textContent = "Welcome!";
+        setStatus("");
+    }
+
+    async function bootstrap() {
         try {
-            const { backendUrl, apiToken } = await chrome.storage.sync.get({
-                backendUrl: "http://localhost:8098",
-                apiToken: ""
+            const cfg = await getSync({
+                mode: "auto",
+                showToolbarOnSelection: true,
+                targetLang: "en",
+                apiToken: "",
+                tokenExp: 0,
+                profileName: "",
+                profileUsername: ""
             });
-            if (!backendUrl || !apiToken) {
-                hideProfile();
-                renderAuthStatus();
-                return;
+
+            modeSel.value = cfg.mode || "auto";
+            toggleSelection.checked = !!cfg.showToolbarOnSelection;
+            targetLangSel.value = cfg.targetLang || "en";
+
+            const tokenValid = !!cfg.apiToken && (!cfg.tokenExp || Date.now() < Number(cfg.tokenExp));
+            if (tokenValid) {
+                setSignedInUI({ name: cfg.profileName, username: cfg.profileUsername });
+            } else {
+                setSignedOutUI();
             }
-            const res = await fetch(new URL("/api/v1/auth/me", backendUrl).toString(), {
-                headers: { "Authorization": `Bearer ${apiToken}` },
-                credentials: "omit"
-            });
-            if (!res.ok) {
-                if (res.status === 401) {
-                    await chrome.storage.sync.set({ apiToken: "", tokenExp: 0 });
-                    st.apiToken = "";
-                    st.tokenExp = 0;
-                }
-                hideProfile();
-                renderAuthStatus();
-                return;
-            }
-            const me = await res.json();
-            showProfile(me.fullName, me.username);
-            renderAuthStatus();
-        } catch {
-            hideProfile();
-            renderAuthStatus();
+        } catch (e) {
+            setStatus(e?.message || String(e), "err");
         }
     }
 
-    function renderAuthStatus() {
-        const now = Date.now();
-        if (st.apiToken && st.tokenExp && now < st.tokenExp) {
-            const mins = Math.max(0, Math.round((st.tokenExp - now) / 60000));
-            setStatus(`Logged in. Token expires in ~${mins} min.`, true);
-        } else if (st.backendUrl) {
-            setStatus("Not logged in.");
-        } else {
-            setStatus("Set backend URL in Options first.", false);
-        }
-    }
-    renderAuthStatus();
-
-    // Toggle visibility of signup full name row
-    toggleSignupBtn.addEventListener("click", () => {
-        signupExtra.classList.toggle("hidden");
+    // Settings events
+    modeSel.addEventListener("change", async () => {
+        await setSync({ mode: modeSel.value });
+        setStatus("Mode updated", "ok");
+        setTimeout(() => setStatus(""), 900);
+    });
+    toggleSelection.addEventListener("change", async () => {
+        await setSync({ showToolbarOnSelection: toggleSelection.checked });
+        setStatus("Selection toolbar setting updated", "ok");
+        setTimeout(() => setStatus(""), 900);
+    });
+    targetLangSel.addEventListener("change", async () => {
+        await setSync({ targetLang: targetLangSel.value });
+        setStatus("Target language updated", "ok");
+        setTimeout(() => setStatus(""), 900);
     });
 
-    // Login
-    loginBtn.addEventListener("click", async () => {
-        const username = usernameEl.value.trim();
-        const password = passwordEl.value;
-        if (!username || !password) {
-            setStatus("Enter username and password.", false);
-            return;
-        }
-        setStatus("Logging in...");
-        chrome.runtime.sendMessage(
-            { type: "PAGEGENIE_AUTH_LOGIN", username, password },
-            async (resp) => {
-                if (chrome.runtime.lastError) {
-                    setStatus("Login failed: " + chrome.runtime.lastError.message, false);
-                    return;
-                }
-                if (resp?.ok) {
-                    const { token, exp } = resp;
-                    st.apiToken = token;
-                    st.tokenExp = exp || 0;
-                    passwordEl.value = "";
-                    setStatus("Logged in.", true);
-                    await refreshMe();
-                } else {
-                    setStatus("Login failed: " + (resp?.error || "unknown error"), false);
-                }
-            }
-        );
-    });
+    // Log in
+    loginForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        setStatus("Signing in…");
+        loginBtn.disabled = true;
 
-    // Signup
-    signupBtn.addEventListener("click", async () => {
-        const username = usernameEl.value.trim();
-        const password = passwordEl.value;
-        const fullName = fullNameEl.value.trim();
-        if (!username || !password || !fullName) {
-            setStatus("Full name, username, and password are required for signup.", false);
-            return;
-        }
-        setStatus("Signing up...");
-        chrome.runtime.sendMessage(
-            { type: "PAGEGENIE_AUTH_SIGNUP", username, password, fullName },
-            async (resp) => {
-                if (chrome.runtime.lastError) {
-                    setStatus("Signup failed: " + chrome.runtime.lastError.message, false);
-                    return;
-                }
-                if (!resp?.ok) {
-                    setStatus("Signup failed: " + (resp?.error || "unknown error"), false);
-                    return;
-                }
-                // Auto-login after signup
+        try {
+            const username = (loginUsername.value || "").trim();
+            const password = (loginPassword.value || "").trim();
+            if (!username || !password) throw new Error("Username and password required");
+
+            const resp = await new Promise((resolve) => {
                 chrome.runtime.sendMessage(
                     { type: "PAGEGENIE_AUTH_LOGIN", username, password },
-                    async (loginResp) => {
-                        if (loginResp?.ok) {
-                            st.apiToken = loginResp.token;
-                            st.tokenExp = loginResp.exp || 0;
-                            passwordEl.value = "";
-                            setStatus("Signed up and logged in.", true);
-                            signupExtra.classList.add("hidden");
-                            await refreshMe();
+                    (r) => {
+                        if (chrome.runtime.lastError) {
+                            resolve({ ok: false, error: chrome.runtime.lastError.message });
                         } else {
-                            setStatus("Account created. Please login.", true);
+                            resolve(r);
                         }
                     }
                 );
-            }
-        );
-    });
+            });
 
-    // Logout
-    logoutBtn.addEventListener("click", async () => {
-        chrome.runtime.sendMessage({ type: "PAGEGENIE_AUTH_LOGOUT" }, async (resp) => {
-            if (resp?.ok) {
-                st.apiToken = "";
-                st.tokenExp = 0;
-                hideProfile();
-                setStatus("Logged out.", true);
-                renderAuthStatus();
-            }
-        });
-    });
+            if (!resp?.ok) throw new Error(resp?.error || "Login failed");
+            await setSync({ profileUsername: username });
+            const cfg = await getSync({ profileName: "", profileUsername: "" });
+            setSignedInUI({ name: cfg.profileName, username: cfg.profileUsername });
+            setStatus("Signed in", "ok");
 
-    // Reading Mode page
-    readingBtn.addEventListener("click", () => {
-        const url = chrome.runtime.getURL("reading/reading.html");
-        chrome.tabs.create({ url });
-    });
-
-    // Keep status in sync if storage changes elsewhere
-    chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== "sync") return;
-        if (changes.apiToken) st.apiToken = changes.apiToken.newValue;
-        if (changes.tokenExp) st.tokenExp = changes.tokenExp.newValue;
-        if (changes.backendUrl) st.backendUrl = changes.backendUrl.newValue;
-        renderAuthStatus();
-        // If token updated, refresh profile
-        if (changes.apiToken || changes.tokenExp) {
-            refreshMe();
+            // Hide signup block after login
+            signupWrap.hidden = true;
+        } catch (e2) {
+            setStatus(e2?.message || String(e2), "err");
+        } finally {
+            loginBtn.disabled = false;
         }
     });
 
-    // If already logged in, load profile now
-    if (isLoggedIn()) {
-        refreshMe();
-    } else {
-        hideProfile();
-    }
-});
+    // Sign up
+    signupForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        setStatus("Creating account…");
+        signupBtn.disabled = true;
+
+        try {
+            const fullName = (signupFullName.value || "").trim();
+            const username = (signupUsername.value || "").trim();
+            const password = (signupPassword.value || "").trim();
+            if (!fullName || !username || !password) throw new Error("All fields are required");
+
+            const resp = await new Promise((resolve) => {
+                chrome.runtime.sendMessage(
+                    { type: "PAGEGENIE_AUTH_SIGNUP", fullName, username, password },
+                    (r) => {
+                        if (chrome.runtime.lastError) {
+                            resolve({ ok: false, error: chrome.runtime.lastError.message });
+                        } else {
+                            resolve(r);
+                        }
+                    }
+                );
+            });
+            if (!resp?.ok) throw new Error(resp?.error || "Signup failed");
+
+            // Persist profile name/username locally
+            await setSync({ profileName: fullName, profileUsername: username });
+
+            // Attempt auto-login
+            const loginResp = await new Promise((resolve) => {
+                chrome.runtime.sendMessage(
+                    { type: "PAGEGENIE_AUTH_LOGIN", username, password },
+                    (r) => {
+                        if (chrome.runtime.lastError) {
+                            resolve({ ok: false, error: chrome.runtime.lastError.message });
+                        } else {
+                            resolve(r);
+                        }
+                    }
+                );
+            });
+
+            if (loginResp?.ok) {
+                setSignedInUI({ name: fullName, username });
+                setStatus("Account created and signed in", "ok");
+                signupWrap.hidden = true;
+            } else {
+                setStatus("Account created. Please log in.", "ok");
+            }
+        } catch (e2) {
+            setStatus(e2?.message || String(e2), "err");
+        } finally {
+            signupBtn.disabled = false;
+        }
+    });
+
+    // Log out
+    logoutBtn.addEventListener("click", async () => {
+        setStatus("Signing out…");
+        try {
+            const resp = await new Promise((resolve) => {
+                chrome.runtime.sendMessage({ type: "PAGEGENIE_AUTH_LOGOUT" }, (r) => {
+                    if (chrome.runtime.lastError) {
+                        resolve({ ok: false, error: chrome.runtime.lastError.message });
+                    } else {
+                        resolve(r);
+                    }
+                });
+            });
+            if (!resp?.ok) throw new Error(resp?.error || "Logout failed");
+            setSignedOutUI();
+            // Re-enable signup UI after logout
+            signupWrap.hidden = false;
+            setStatus("Signed out", "ok");
+            setTimeout(() => setStatus(""), 900);
+        } catch (e) {
+            setStatus(e?.message || String(e), "err");
+        }
+    });
+
+    // Open Reading Mode (PDF Reader page)
+    readingModeBtn.addEventListener("click", async () => {
+        try {
+            await new Promise((resolve) => {
+                chrome.runtime.sendMessage({ type: "PAGEGENIE_OPEN_READER", op: "summarize_full" }, () => resolve());
+            });
+            setStatus("Opened Reading Mode", "ok");
+            setTimeout(() => setStatus(""), 1200);
+        } catch {
+            setStatus("Failed to open Reading Mode", "err");
+        }
+    });
+
+    // Open Library (notes/suggestions/quizzes hub)
+    openHubBtn.addEventListener("click", () => {
+        const url = chrome.runtime.getURL("pages/reading.html");
+        window.open(url, "_blank");
+    });
+
+    // Init
+    bootstrap();
+})();
