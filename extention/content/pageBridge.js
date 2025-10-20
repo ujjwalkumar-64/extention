@@ -160,6 +160,8 @@
     function buildPrompt(operation, text, targetLang) {
         switch (operation) {
             case "summarize":
+            case "summarize_full":
+            case "process_full":
                 return `Summarize the following text concisely in bullet points.\nReturn only the summary.\n\n---\n${text}\n---`;
             case "explain":
                 return `Explain the following text for a general audience.\nBe clear and concise. Return only the explanation.\n\n---\n${text}\n---`;
@@ -533,6 +535,99 @@
         return s;
     }
 
+    // --------- PDF/full-document friendly map-reduce summarization ---------
+
+    const CHUNK_MAX = 8000;     // characters per chunk (approx for on-device comfort)
+    const CHUNK_OVERLAP = 200;  // characters overlap to preserve context across boundaries
+
+    function splitIntoChunks(text, maxLen = CHUNK_MAX, overlap = CHUNK_OVERLAP) {
+        const t = String(text || "");
+        if (t.length <= maxLen) return [t];
+        const chunks = [];
+        let i = 0;
+        while (i < t.length) {
+            const end = Math.min(t.length, i + maxLen);
+            const slice = t.slice(i, end);
+            chunks.push(slice);
+            if (end >= t.length) break;
+            i = end - overlap; // move with overlap
+            if (i < 0) i = 0;
+        }
+        return chunks;
+    }
+
+    // Use Summarizer if present; else Prompt; perform map (per chunk) then reduce (final)
+    async function callSummarizeLarge(id, text) {
+        const chunks = splitIntoChunks(text);
+        if (chunks.length === 1) {
+            // Single-chunk path: reuse normal summarize
+            try {
+                return await callSummarizer(id, chunks[0]);
+            } catch {
+                const s = await getPromptSession();
+                return ensureText(await withTimeout(s.prompt(buildPrompt("summarize", chunks[0])), 30000, "Prompt summarize timed out"));
+            }
+        }
+
+        pingProgress(id, `Large document detected • ${chunks.length} parts`);
+
+        // Try Summarizer first
+        let summaries = [];
+        let used = "summarizer";
+        try {
+            const summarizer = await getSummarizer(id);
+            for (let idx = 0; idx < chunks.length; idx++) {
+                pingProgress(id, `Summarizing part ${idx + 1}/${chunks.length}`);
+                const r = await withTimeout(
+                    summarizer.summarize(chunks[idx], { context: "Summarize clearly for a general audience." }),
+                    Math.max(30000, 12000 + chunks[idx].length), // adaptive
+                    "Summarizer chunk timed out"
+                );
+                summaries.push(ensureText(r));
+            }
+        } catch {
+            // Fallback to Prompt API
+            used = "prompt";
+            const s = await getPromptSession();
+            summaries = [];
+            for (let idx = 0; idx < chunks.length; idx++) {
+                pingProgress(id, `Summarizing part ${idx + 1}/${chunks.length} (Prompt)`);
+                const r = await withTimeout(
+                    s.prompt(buildPrompt("summarize", chunks[idx])),
+                    Math.max(30000, 12000 + chunks[idx].length),
+                    "Prompt chunk timed out"
+                );
+                summaries.push(ensureText(r));
+            }
+        }
+
+        // Reduce step: summarize the summaries
+        const combined = summaries.map((p, i) => `Part ${i + 1}:\n${p}`).join("\n\n");
+        pingProgress(id, "Combining parts into final summary");
+
+        if (used === "summarizer") {
+            try {
+                const summarizer = await getSummarizer(id);
+                const finalR = await withTimeout(
+                    summarizer.summarize(combined, { context: "Combine the part summaries into one concise summary." }),
+                    Math.max(30000, 8000 + combined.length),
+                    "Summarizer reduce timed out"
+                );
+                return ensureText(finalR);
+            } catch {
+                // fall through to prompt
+            }
+        }
+
+        const s = await getPromptSession();
+        const final = await withTimeout(
+            s.prompt(buildPrompt("summarize", combined)),
+            Math.max(30000, 8000 + combined.length),
+            "Prompt reduce timed out"
+        );
+        return ensureText(final);
+    }
+
     // Minimal monitor factory for non-translation APIs (emit only 100%)
     function mkMonitor(id) {
         return (m) => attachMonitor(id, m, { verbose: false });
@@ -653,6 +748,13 @@
                             )
                         );
                     }
+                    break;
+                }
+
+                // New: full-document friendly summarization for PDFs/large texts
+                case "summarize_full":
+                case "process_full": {
+                    output = await callSummarizeLarge(id, text);
                     break;
                 }
 

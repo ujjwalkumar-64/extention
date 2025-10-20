@@ -1,4 +1,4 @@
-// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save)
+// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save, Process Full Doc)
 // - Quick-Fix DOM Injection (Replace with Proofread, Translation Overlay, Insert Code Comments)
 // - Offline (on-device) AI via pageBridge + Online fallback via Spring Boot (/api/v1/ai)
 // - Save Note shows Categories bubble + Curated Reading side panel
@@ -42,7 +42,7 @@
         } catch {}
     }
 
-    // Trim large inputs for fast on-device operations (not for translate/proofread)
+    // Trim large inputs for fast on-device operations (not for translate/proofread/code-comment)
     function trimForLocal(op, text, limit = 8000) {
         if (!text || typeof text !== "string") return text;
         if (op === "translate" || op === "proofread" || op === "comment_code") return text;
@@ -140,11 +140,14 @@
     // Handle context menu relay and toasts from background + background-driven loaders
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg?.type === "PAGEGENIE_CONTEXT_ACTION") {
-            if (!lastRange || !lastSelectionText) return;
-            if (msg.operation === "summarize") runSimpleOp("summarize");
-            if (msg.operation === "explain") runSimpleOp("explain");
-            if (msg.operation === "translate") runTranslationOverlay();
-            if (msg.operation === "quick_comment") insertCodeComments();
+            if (msg.operation === "process_full") runFullDocSummarize();
+            else {
+                if (!lastRange || !lastSelectionText) return;
+                if (msg.operation === "summarize") runSimpleOp("summarize");
+                if (msg.operation === "explain") runSimpleOp("explain");
+                if (msg.operation === "translate") runTranslationOverlay();
+                if (msg.operation === "quick_comment") insertCodeComments();
+            }
         }
         if (msg?.type === "PAGEGENIE_TOAST" && msg.message) {
             showToast(msg.message);
@@ -181,6 +184,7 @@
     toolbar.on("explain", () => runSimpleOp("explain"));
     toolbar.on("rewrite", () => runSimpleOp("rewrite"));
     toolbar.on("translate", () => runTranslationOverlay());
+    toolbar.on("process_full", () => runFullDocSummarize());
     toolbar.on("save", () => saveNote());
     toolbar.on("compare_concept", () => compareConceptDrift());
     toolbar.on("quiz_selection", () => quizSelectedText());
@@ -189,27 +193,130 @@
     toolbar.on("quick_overlay", () => runTranslationOverlay());
     toolbar.on("quick_comment", () => insertCodeComments());
 
+
+
+// Unified active text resolver (no in-page PDF parsing anymore)
+    async function getActiveText({ fullDoc = false } = {}) {
+        // 1) Prefer DOM selection
+        const sel = document.getSelection();
+        const selected = sel && !sel.isCollapsed ? String(sel.toString() || "").trim() : "";
+        if (selected) {
+            return { text: selected, strategy: "selection" };
+        }
+
+        // 2) Full document requested: return HTML text only (PDF handled by Reader)
+        if (fullDoc) {
+            return { text: getWholePageText(), strategy: "full_html" };
+        }
+
+        // 3) Default: whole page text
+        return { text: getWholePageText(), strategy: "full_html" };
+    }
+
+    function getWholePageText() {
+        const body = document.body;
+        if (!body) return "";
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+            acceptNode: (n) => {
+                if (!n.nodeValue) return NodeFilter.FILTER_REJECT;
+                const parent = n.parentElement;
+                if (!parent) return NodeFilter.FILTER_ACCEPT;
+                const tag = parent.tagName;
+                if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") return NodeFilter.FILTER_REJECT;
+                const cs = getComputedStyle(parent);
+                if (cs.display === "none" || cs.visibility === "hidden") return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
+            }
+        });
+        let text = "", node;
+        while ((node = walker.nextNode())) {
+            const t = String(node.nodeValue || "").replace(/\s+/g, " ").trim();
+            if (t) text += (text ? "\n" : "") + t;
+        }
+        return text;
+    }
+
+// Helper: heuristic to decide “this tab looks like a PDF page”
+    function looksLikePdfPage() {
+        try { if (document.contentType === "application/pdf") return true; } catch {}
+        const href = location?.href || "";
+        if (/\.pdf($|\?)/i.test(href)) return true;
+        if (document.querySelector('embed[type="application/pdf"], object[type="application/pdf"]')) return true;
+        const params = new URLSearchParams(location.search || "");
+        const fileParam = params.get("file") || params.get("src") || params.get("url");
+        if (fileParam && /\.pdf($|\?)/i.test(decodeURIComponent(fileParam))) return true;
+        return false;
+    }
+
+// Process full document → route PDFs to Reader page, otherwise summarize HTML in-place
+    async function runFullDocSummarize() {
+        const loader = createLoadingToast("Processing full document");
+        const throttledSet = throttle(loader.set.bind(loader), 120);
+
+        try {
+            if (looksLikePdfPage()) {
+                throttledSet("Opening Reader for PDF…");
+                // Ask background to open Reader. It will resolve the actual PDF URL.
+                chrome.runtime.sendMessage(
+                    { type: "PAGEGENIE_OPEN_READER", op: "summarize_full", src: location.href },
+                    () => { /* ignore lastError; Reader opens in a new tab */ }
+                );
+                loader.success("Reader opened");
+                return;
+            }
+
+            // HTML path: summarize full page text locally/online using existing flow
+            const active = await getActiveText({ fullDoc: true });
+            if (!active.text) throw new Error("No text found in document");
+
+            const inputText = (settings.mode !== "online-only")
+                ? trimForLocal("summarize", active.text, 16000)
+                : active.text;
+
+            const raw = await runAI("summarize", inputText, settings.targetLang, (stage) => {
+                throttledSet(`Summary • ${stage}`);
+            });
+            const result = toPlainText(raw);
+            loader.success("Summary ready");
+            showResultPanel(result);
+            persist("/api/ops/log", {
+                type: "summarize_full_doc",
+                source: location.href,
+                input_len: active.text.length,
+                output: result,
+                strategy: active.strategy,
+                ts: Date.now()
+            });
+        } catch (e) {
+            loader.error("AI error: " + (e?.message || e));
+        }
+    }
+
     // Simple result operations (non-injection)
     async function runSimpleOp(op) {
-        if (!lastSelectionText) return;
         const loader = createLoadingToast("Preparing " + opTitle(op));
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
+            const active = await getActiveText({ fullDoc: false });
+            if (!active.text) throw new Error("No text found to process");
             const inputText = (settings.mode !== "online-only")
-                ? trimForLocal(op, lastSelectionText)
-                : lastSelectionText;
+                ? trimForLocal(op, active.text)
+                : active.text;
 
             const raw = await runAI(op, inputText, settings.targetLang, (stage) => {
                 throttledSet(`${opTitle(op)} • ${stage}`);
             });
             const result = toPlainText(raw);
             loader.success(opTitle(op) + " ready");
+
+            // If selection strategy, show panel as usual
             showResultPanel(result);
             persist("/api/ops/log", {
                 type: op,
                 source: location.href,
-                input: lastSelectionText,
+                input: active.text.slice(0, 2000), // avoid overlogging
                 output: result,
+                strategy: active.strategy,
                 ts: Date.now()
             });
         } catch (e) {
@@ -219,7 +326,12 @@
 
     // Quick-Fix: Replace selection with proofread text
     async function replaceWithProofread() {
-        if (!lastRange || !lastSelectionText) return;
+        // Only possible when we have a DOM selection we can replace (not on PDF plugin)
+        const sel = document.getSelection();
+        if (!sel || sel.isCollapsed || !lastRange || !lastSelectionText) {
+            showToast("Select text to proofread");
+            return;
+        }
         const loader = createLoadingToast("Proofreading...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
@@ -243,22 +355,32 @@
 
     // Quick-Fix: Translation overlay bubble
     async function runTranslationOverlay() {
-        if (!lastRange || !lastSelectionText) return;
         const loader = createLoadingToast("Translating...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
-            const raw = await runAI("translate", lastSelectionText, settings.targetLang, (stage) => {
+            const active = await getActiveText({ fullDoc: false });
+            if (!active.text) throw new Error("No text found to translate");
+
+            const raw = await runAI("translate", active.text, settings.targetLang, (stage) => {
                 throttledSet(`Translating • ${stage}`);
             });
             const result = toPlainText(raw);
             loader.success("Translation ready");
-            showTranslationBubble(lastRange, result);
+
+            // If we had a selection range on HTML, show bubble; otherwise show panel
+            if (active.strategy === "selection" && lastRange) {
+                showTranslationBubble(lastRange, result);
+            } else {
+                showResultPanel(result);
+            }
+
             persist("/api/ops/log", {
                 type: "translation_overlay",
                 source: location.href,
-                input: lastSelectionText,
+                input_len: active.text.length,
                 output: result,
                 targetLang: settings.targetLang,
+                strategy: active.strategy,
                 ts: Date.now()
             });
         } catch (e) {
@@ -296,10 +418,11 @@
 
     // Save note: persist to backend, show categories bubble, then curated reading panel
     async function saveNote() {
-        if (!lastSelectionText) return;
+        const active = await getActiveText({ fullDoc: false });
+        if (!active.text) return showToast("No text to save");
         const loader = createLoadingToast("Saving note...");
         try {
-            const payload = { source: location.href, content: lastSelectionText, ts: Date.now() };
+            const payload = { source: location.href, content: active.text, ts: Date.now() };
             const res = await persist("/api/notes", payload);
             if (!res?.ok) throw new Error(res?.error || "Save failed");
 
@@ -310,7 +433,7 @@
             try {
                 const suggestResp = await persist("/api/v1/reading/suggest", {
                     baseUrl: location.href,
-                    baseSummary: categories?.summary || lastSelectionText.slice(0, 400)
+                    baseSummary: categories?.summary || active.text.slice(0, 400)
                 });
                 if (suggestResp?.ok) {
                     const suggestions = normalizeSuggestionsShape(suggestResp.data);
@@ -326,10 +449,11 @@
 
     // Analyze Concept Drift
     async function compareConceptDrift() {
-        if (!lastSelectionText) return;
+        const active = await getActiveText({ fullDoc: false });
+        if (!active.text) { showToast("Select some text"); return; }
         const loader = createLoadingToast("Analyzing against your notes…");
         try {
-            const resp = await sendCompareConcept(lastSelectionText, location.href);
+            const resp = await sendCompareConcept(active.text, location.href);
             if (!resp?.ok) throw new Error(resp?.error || "Compare failed");
             const data = resp.data || {};
             loader.success("Analysis ready");
@@ -341,8 +465,9 @@
             persist("/api/ops/log", {
                 type: "analyze_concept_drift",
                 source: location.href,
-                input: lastSelectionText,
+                input_len: active.text.length,
                 output: JSON.stringify(data),
+                strategy: active.strategy,
                 ts: Date.now()
             });
         } catch (e) {
@@ -369,7 +494,8 @@
 
     // Quiz from selection
     async function quizSelectedText() {
-        if (!lastSelectionText) {
+        const active = await getActiveText({ fullDoc: false });
+        if (!active.text) {
             showToast("Select some text to quiz");
             return;
         }
@@ -377,7 +503,7 @@
         try {
             loader.set("Using cloud AI to generate quiz");
             const resp = await persist("/api/v1/quiz/generate-from-text", {
-                text: lastSelectionText,
+                text: active.text,
                 sourceUrl: location.href,
                 title: document.title?.slice(0, 120) || "Selection"
             });
@@ -398,8 +524,9 @@
             persist("/api/ops/log", {
                 type: "quiz_from_selection",
                 source: location.href,
-                input: lastSelectionText,
+                input_len: active.text.length,
                 output: String(quizId),
+                strategy: active.strategy,
                 ts: Date.now()
             });
         } catch (e) {
@@ -1070,6 +1197,7 @@
             { id: "explain", label: "💬 Explain" },
             { id: "rewrite", label: "🪄 Rewrite" },
             { id: "translate", label: "🌍 Translate" },
+            { id: "process_full", label: "📄 Process Full Doc" },
             { id: "sep", label: "|" },
             { id: "save", label: "📘 Save" },
             { id: "compare_concept", label: "🔗 Analyze Concept Drift" },

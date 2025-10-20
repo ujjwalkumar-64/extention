@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>PageGenie Reader</title>
+    <link rel="stylesheet" href="reader.css" />
+</head>
+<body>
+<div id="app">
+    <div class="header">
+        <div class="title">PageGenie Reader</div>
+        <div class="meta">Parse a PDF and view/transform text</div>
+    </div>
+
+    <div id="status">Loading…</div>
+
+    <!-- Fallback UI (shown when no URL can be resolved) -->
+    <section id="fallback" style="display:none; margin: 10px 0 12px;">
+        <div style="margin: 8px 0; color: var(--muted);">
+            Couldn’t resolve a PDF URL from the current tab. Load a PDF below:
+        </div>
+
+        <div id="dropzone" class="dropzone">
+            Drag & drop a .pdf here
+        </div>
+
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <label class="pg-btn ghost">
+                Choose local PDF
+                <input id="fileInput" type="file" accept="application/pdf" style="display:none;" />
+            </label>
+
+            <input id="urlInput" type="text" placeholder="https://example.com/file.pdf" class="pg-input" />
+
+            <button id="loadUrlBtn" class="pg-btn">Load URL</button>
+        </div>
+
+        <div style="margin-top:8px; color: var(--muted); font-size:12px;">
+            Tip: For local files, enable “Allow access to file URLs” for this extension in chrome://extensions.
+        </div>
+    </section>
+
+    <!-- Action bar: run the same operations via backend -->
+    <section id="actions" style="display:none; margin: 10px 0 12px;">
+        <div class="actions-row">
+            <div class="actions-group">
+                <button class="pg-act pg-btn" data-action="summarize">✨ Summarize</button>
+                <button class="pg-act pg-btn" data-action="explain">💬 Explain</button>
+                <button class="pg-act pg-btn" data-action="rewrite">🪄 Rewrite</button>
+                <button class="pg-act pg-btn" data-action="proofread">🧹 Proofread</button>
+            </div>
+
+            <div class="actions-group">
+                <label class="pg-label">Target</label>
+                <select id="targetLang" class="pg-select" title="Target language">
+                    <!-- Popular languages -->
+                    <option value="en">English (en)</option>
+                    <option value="hi">Hindi (hi)</option>
+                    <option value="es">Spanish (es)</option>
+                    <option value="fr">French (fr)</option>
+                    <option value="de">German (de)</option>
+                    <option value="zh">Chinese (zh)</option>
+                    <option value="ja">Japanese (ja)</option>
+                    <option value="ko">Korean (ko)</option>
+                    <option value="pt">Portuguese (pt)</option>
+                    <option value="ru">Russian (ru)</option>
+                    <option value="ar">Arabic (ar)</option>
+                    <option value="it">Italian (it)</option>
+                    <option value="bn">Bengali (bn)</option>
+                    <option value="pa">Punjabi (pa)</option>
+                    <option value="mr">Marathi (mr)</option>
+                    <option value="te">Telugu (te)</option>
+                    <option value="ta">Tamil (ta)</option>
+                    <option value="ur">Urdu (ur)</option>
+                    <option value="gu">Gujarati (gu)</option>
+                </select>
+                <button class="pg-act pg-btn" data-action="translate">🌍 Translate</button>
+            </div>
+        </div>
+        <div id="hint" class="hint">
+            Actions run via your backend. Configure token/URL in the extension options.
+        </div>
+    </section>
+
+    <!-- Parsed text -->
+    <pre id="output" class="card"></pre>
+
+    <!-- Result of the chosen operation -->
+    <section id="resultSection" class="card" style="display:none; margin-top:12px;">
+        <div class="result-header">
+            <div class="result-title">Result</div>
+            <div class="spacer"></div>
+            <button id="copyBtn" class="pg-btn ghost">Copy</button>
+            <button id="downloadBtn" class="pg-btn ghost">Download</button>
+            <button id="clearBtn" class="pg-btn ghost">Clear</button>
+        </div>
+        <pre id="result" class="result-pre"></pre>
+    </section>
+</div>
+
+<!-- IMPORTANT: static module import is in reader.js to satisfy CSP -->
+<script type="module" src="reader.js"></script>
+</body>
+</html>

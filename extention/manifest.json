@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PageGenie",
-  "description": "Browser-native AI assistant for summarizing, explaining, rewriting, translating, and instant DOM injection.",
-  "version": "0.1.2",
+  "version": "1.0.0",
+  "description": "Selection AI tools for web pages and PDFs with on-device AI first.",
   "action": {
     "default_title": "PageGenie",
     "default_popup": "popup/popup.html"
@@ -12,11 +12,13 @@
     "scripting",
     "activeTab",
     "contextMenus",
-    "tabs"
+    "tabs",
+    "webNavigation"
   ],
   "host_permissions": [
     "http://localhost:8098/*",
-    "https://localhost:8098/*"
+    "https://localhost:8098/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js",
@@ -33,18 +35,30 @@
       "css": [
         "content/toolbar.css"
       ],
-      "run_at": "document_end"
+      "run_at": "document_end",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [
     {
       "resources": [
-        "content/pageBridge.js"
+        "content/pageBridge.js",
+        "libs/pdfjs/pdf.min.mjs",
+        "libs/pdfjs/pdf.worker.min.mjs",
+        "pages/reader.html",
+        "pages/reader.js",
+        "pages/reader.css"
       ],
-      "matches": [
-        "<all_urls>"
-      ]
+      "matches": ["<all_urls>"],
+      "use_dynamic_url": true
     }
   ],
-  "options_page": "options/options.html"
+
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"
+  }
 }
