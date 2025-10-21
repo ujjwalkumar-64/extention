@@ -1,0 +1,125 @@
+:root {
+    --bg: #0f1115;
+    --fg: #e8eaf0;
+    --muted: #9aa3b2;
+    --surface: #171a21;
+    --border: rgba(255,255,255,0.14);
+    --accent: #5aa9ff;
+    --ok: #22c55e;
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #ffffff;
+        --fg: #0b1220;
+        --muted: #4d5b78;
+        --surface: #f4f6fa;
+        --border: rgba(0,0,0,0.14);
+        --accent: #2563eb;
+        --ok: #16a34a;
+    }
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+.ob-root {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 18px 16px 24px;
+}
+
+.ob-header {
+    margin-bottom: 10px;
+}
+.ob-title {
+    font-weight: 800;
+    font-size: 22px;
+}
+.ob-sub {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 4px;
+}
+
+.ob-steps {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+.ob-step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    margin: 10px 0;
+}
+.ob-step h2 {
+    margin: 0 0 6px 0;
+    font-size: 16px;
+}
+.ob-step p {
+    margin: 4px 0 10px 0;
+    color: var(--muted);
+    font-size: 13px;
+}
+.ob-details summary {
+    cursor: pointer;
+    color: var(--fg);
+}
+.ob-details {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+label span {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 4px;
+}
+select {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    min-width: 220px;
+}
+
+.ob-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    flex-wrap: wrap;
+}
+
+.ob-btn {
+    background: #2b2f3a;
+    color: #fff;
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+}
+.ob-btn:hover { filter: brightness(1.05); }
+.ob-btn.primary { background: #155e75; border-color: #134e5e; }
+.ob-btn.primary:hover { background: #1b6b85; }
+
+.ob-footer {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.ob-tip {
+    color: var(--muted);
+    font-size: 12px;
+}
+.ob-right { display: flex; gap: 8px; }

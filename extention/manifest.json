@@ -37,6 +37,24 @@
       "all_frames": true
     }
   ],
+  "commands": {
+    "summarize-selection": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Summarize current selection (or confirm full page)"
+    },
+    "explain-selection": {
+      "suggested_key": { "default": "Alt+Shift+E" },
+      "description": "Explain current selection (or confirm full page)"
+    },
+    "rewrite-selection": {
+      "suggested_key": { "default": "Alt+Shift+R" },
+      "description": "Rewrite current selection (or confirm full page)"
+    },
+    "translate-selection": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "Translate current selection (or confirm full page)"
+    }
+  },
   "web_accessible_resources": [
     {
       "resources": [
@@ -47,6 +65,9 @@
         "pages/reading.html",
         "pages/reading.js",
         "pages/reading.css",
+        "pages/onboarding.html",
+        "pages/onboarding.js",
+        "pages/onboarding.css",
         "libs/pdfjs/pdf.min.mjs",
         "libs/pdfjs/pdf.worker.min.mjs",
         "quiz/quiz.html"

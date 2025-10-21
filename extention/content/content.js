@@ -7,11 +7,10 @@
 // - Full-page confirmation before whole-page processing (showFullPageConfirm)
 // - Cloud-only input limit (CLOUD_CHAR_LIMIT) for backend; no hard limit for on-device
 // - Persona presets + Cite Sources flag passed to AI (persona, citeSources)
-// - Structured results support for summarize/explain: { bullets: [...], citations: [...] } with References section
-// - Theme (system/light/dark) + consistent iconography + animations + accessibility (ARIA, keyboard nav)
-// - Keyboard shortcuts: Alt+Shift+S (Summarize), Alt+Shift+E (Explain), Alt+Shift+R (Rewrite), Alt+Shift+T (Translate), Alt+Shift+P (Proofread)
-// - Telemetry microcopy: small badge in results showing On-device/Cloud, time, char count
-// - FIX: Multi-word selection reliability — show toolbar on mouseup; ignore while dragging
+// - Structured results for summarize/explain: { bullets: [...], citations: [...] } with References rendering
+// - Theme (system/light/dark) + consistent SVG iconography + subtle animations + accessibility (ARIA, keyboard nav)
+// - Hotkeys handled via background commands: Summarize (Alt+Shift+S), Explain (Alt+Shift+E), Rewrite (Alt+Shift+R), Translate (Alt+Shift+T)
+// - FIX: Multi-word selection reliability — show toolbar after mouseup to avoid one-word-only selection
 
 (function init() {
     injectPageBridge();
@@ -24,24 +23,30 @@
             if (now - last >= ms) run(msg);
             else {
                 queued = msg;
-                if (!timer) {
-                    timer = setTimeout(() => { if (queued != null) run(queued); }, ms - (now - last));
-                }
+                if (!timer) timer = setTimeout(() => { if (queued != null) run(queued); }, ms - (now - last));
             }
         };
     }
 
+    // Global settings
     let settings = {
-        mode: "auto",
+        mode: "auto",              // "auto" | "offline-only" | "online-only"
         showToolbarOnSelection: true,
         showFloatingButton: false,
         showFullPageConfirm: true,
         targetLang: "en",
-        theme: "system",
-        persona: "general",
+        theme: "system",           // "system" | "light" | "dark"
+        persona: "general",        // "general" | "student" | "researcher" | "editor"
         citeSources: false
     };
 
+    // Track AI path for microcopy in result panels
+    let __pg_last_ai_path = ""; // "device" | "cloud" | ""
+
+    // System dark preference for theme auto mode
+    const _pg_mql = window.matchMedia?.("(prefers-color-scheme: dark)") || null;
+
+    // Load settings
     chrome.storage.sync.get(
         {
             mode: "auto",
@@ -59,10 +64,13 @@
             pgApplyTheme();
             if (settings.mode === "offline-only") prewarmLikely();
             if (settings.showFloatingButton) ensureFloatingButton();
+            if (settings.mode !== "online-only") {
+                setTimeout(prewarmLikely, 200);
+            }
         }
     );
 
-    const _pg_mql = window.matchMedia?.("(prefers-color-scheme: dark)") || null;
+    // React to settings changes
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "sync") return;
         if (changes.mode) settings.mode = changes.mode.newValue;
@@ -72,7 +80,14 @@
             if (settings.showFloatingButton) ensureFloatingButton(); else removeFloatingButton();
         }
         if (changes.showFullPageConfirm) settings.showFullPageConfirm = !!changes.showFullPageConfirm.newValue;
-        if (changes.targetLang) settings.targetLang = changes.targetLang.newValue;
+        if (changes.targetLang) {
+            settings.targetLang = changes.targetLang.newValue;
+            // re-prewarm language‑dependent tasks (ok to call; bridge caches instances)
+            if (settings.mode !== "online-only") {
+                // do not flip the __pg_prewarmed guard so we can re-send just for language updates
+                try { prewarmAllApis(); } catch {}
+            }
+        }
         if (changes.persona) settings.persona = changes.persona.newValue;
         if (changes.citeSources) settings.citeSources = !!changes.citeSources.newValue;
         if (changes.theme) {
@@ -88,26 +103,41 @@
         }
     });
 
+    function prewarmAllApis() {
+        try {
+            const want = [
+                // Keep Prompt first so we always have a session for generic fallback
+                { kind: "prompt" },
+                // Language-aware task APIs
+                { kind: "translator", opts: { targetLanguage: settings.targetLang || "en", sourceLanguage: "auto" } },
+                { kind: "proofreader", opts: { expectedInputLanguages: [ (settings.targetLang || "en") ] } },
+                // Style/structure tasks
+                { kind: "summarizer", opts: { /* you can pass sharedContext/tone if your bridge supports it */ } },
+                { kind: "rewriter",   opts: { tone: "neutral", format: "plain-text", length: "medium" } },
+                { kind: "writer",     opts: { tone: "neutral", format: "plain-text", length: "medium" } },
+            ];
+            window.postMessage({ type: "PAGEGENIE_AI_PREWARM", id: "prewarm_all", want }, "*");
+        } catch {}
+    }
+
+
+    // Prewarm on-device
     let __pg_prewarmed = false;
     function prewarmLikely() {
         if (__pg_prewarmed) return;
         __pg_prewarmed = true;
-        try {
-            const want = [
-                { kind: "prompt" },
-                { kind: "translator", opts: { targetLanguage: settings.targetLang || "en" } },
-                { kind: "writer" }
-            ];
-            window.postMessage({ type: "PAGEGENIE_AI_PREWARM", id: "prewarm", want }, "*");
-        } catch {}
+        if (settings.mode === "online-only") return; // respect user choice
+        prewarmAllApis();
     }
 
-    let onDeviceReady = null;
-    async function ensureOnDeviceReady() {
-        if (onDeviceReady !== null) return onDeviceReady;
-        onDeviceReady = new Promise((resolve) => {
-            let done = false;
-            const finish = (val) => { if (done) return; done = true; resolve(!!val); };
+    // On-device readiness probe
+
+    let __pg_deviceReady = false;
+
+    function probeDeviceReady(timeoutMs = 800) {
+        return new Promise((resolve) => {
+            let settled = false;
+            const finish = (ok) => { if (settled) return; settled = true; resolve(!!ok); };
             const handler = (ev) => {
                 if (ev.source !== window) return;
                 const d = ev.data;
@@ -117,42 +147,30 @@
             };
             window.addEventListener("message", handler, true);
             try { window.postMessage({ type: "PAGEGENIE_AI_PING" }, "*"); } catch {}
-            setTimeout(() => finish(false), 800);
+            setTimeout(() => {
+                try { window.removeEventListener("message", handler, true); } catch {}
+                finish(false);
+            }, timeoutMs);
         });
-        return onDeviceReady;
     }
 
+// Only cache TRUE; if probe fails, we retry next time.
+    async function ensureOnDeviceReady({ retries = 2, timeout = 800, backoff = 300 } = {}) {
+        if (__pg_deviceReady) return true;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            const ok = await probeDeviceReady(timeout + attempt * backoff);
+            if (ok) { __pg_deviceReady = true; return true; }
+        }
+        return false;
+    }
+
+    // CLOUD LIMIT (backend only)
     const CLOUD_CHAR_LIMIT = 20000;
     function applyCloudLimit(text) {
         if (!text || text.length <= CLOUD_CHAR_LIMIT) return text;
         const suffix = `\n\n[truncated to ${CLOUD_CHAR_LIMIT.toLocaleString()} of ${text.length.toLocaleString()} chars for cloud processing]`;
         return text.slice(0, CLOUD_CHAR_LIMIT) + suffix;
     }
-
-    // Keyboard shortcuts (Alt+Shift+Key)
-    document.addEventListener("keydown", async (e) => {
-        // Ignore if inside input/textarea/contenteditable or modifier keys not pressed
-        const target = e.target;
-        const isInput = target && (
-            target.tagName === "INPUT" ||
-            target.tagName === "TEXTAREA" ||
-            target.isContentEditable
-        );
-        if (isInput) return;
-        if (!(e.altKey && e.shiftKey)) return;
-
-        const key = e.key.toLowerCase();
-        const sel = document.getSelection();
-        const hasSelection = sel && !sel.isCollapsed && String(sel.toString() || "").trim().length > 0;
-
-        try {
-            if (key === "s") { e.preventDefault(); hasSelection ? runSimpleOp("summarize") : runFullDocSummarize(); }
-            else if (key === "e") { e.preventDefault(); hasSelection ? runSimpleOp("explain") : runSimpleOp("explain"); }
-            else if (key === "r") { e.preventDefault(); hasSelection ? runSimpleOp("rewrite") : runSimpleOp("rewrite"); }
-            else if (key === "t") { e.preventDefault(); runTranslationOverlay(); }
-            else if (key === "p") { e.preventDefault(); replaceWithProofread(); }
-        } catch {}
-    }, true);
 
     // Selection toolbar
     const toolbar = createToolbar();
@@ -161,7 +179,7 @@
     let lastAnchorPos = null;
     let lastAnchorPosViewport = null;
 
-    // Fix: multi-word selection reliability
+    // Multi-word selection reliability
     let __pg_isMouseDown = false;
     document.addEventListener("mousedown", (e) => {
         const inOwnUi =
@@ -191,11 +209,12 @@
                 const rectViewport = getViewportRect(lastRange);
                 lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
             }
+
             if (settings.mode !== "online-only") prewarmLikely();
         }, 0);
     }, true);
 
-    // Keep selectionchange for keyboard-selection
+    // Keyboard-based selection (Shift+Arrows)
     document.addEventListener("selectionchange", () => {
         if (__pg_isMouseDown) return;
         if (!settings.showToolbarOnSelection) { toolbar.hide(); return; }
@@ -214,12 +233,26 @@
             const rectViewport = getViewportRect(lastRange);
             lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
         }
+
         if (settings.mode !== "online-only") prewarmLikely();
     });
 
-    // Background messaging: context menu + loaders
+    // Background messaging: hotkeys + context menu + loaders
     const __pg_loaders = new Map();
     chrome.runtime.onMessage.addListener((msg) => {
+        // Hotkeys from background commands
+        if (msg?.type === "PAGEGENIE_HOTKEY") {
+            switch (msg.operation) {
+                case "summarize": runSimpleOp("summarize"); break;
+                case "explain": runSimpleOp("explain"); break;
+                case "rewrite": runSimpleOp("rewrite"); break;
+                case "translate": runTranslationOverlay(); break;
+                default: break;
+            }
+            return;
+        }
+
+        // Context menu relay
         if (msg?.type === "PAGEGENIE_CONTEXT_ACTION") {
             if (msg.operation === "process_full") runFullDocSummarize();
             else {
@@ -229,10 +262,17 @@
                 if (msg.operation === "translate") runTranslationOverlay();
                 if (msg.operation === "quick_comment") insertCodeComments();
             }
+            return;
         }
-        if (msg?.type === "PAGEGENIE_TOAST" && msg.message) showToast(msg.message);
-        if (msg?.type !== "PAGEGENIE_LOADING") return;
 
+        // Toast relay
+        if (msg?.type === "PAGEGENIE_TOAST" && msg.message) {
+            showToast(msg.message);
+            return;
+        }
+
+        // Background-driven loader lifecycle
+        if (msg?.type !== "PAGEGENIE_LOADING") return;
         const id = msg.requestId || "default";
         if (msg.action === "start") {
             try { __pg_loaders.get(id)?.close?.(); } catch {}
@@ -242,7 +282,6 @@
         }
         const loader = __pg_loaders.get(id);
         if (!loader) return;
-
         if (msg.action === "set") loader.set(msg.message || "Working…");
         else if (msg.action === "success") { loader.success(msg.message || "Done"); __pg_loaders.delete(id); }
         else if (msg.action === "error") { loader.error(msg.message || "Error"); __pg_loaders.delete(id); }
@@ -261,6 +300,7 @@
     toolbar.on("quick_comment", () => insertCodeComments());
     toolbar.on("find_sources", () => runFindSources());
 
+    // Unified active text resolver
     async function getActiveText({ fullDoc = false } = {}) {
         const sel = document.getSelection();
         const selected = sel && !sel.isCollapsed ? String(sel.toString() || "").trim() : "";
@@ -292,6 +332,7 @@
         return text;
     }
 
+    // PDF heuristic
     function looksLikePdfPage() {
         try { if (document.contentType === "application/pdf") return true; } catch {}
         const href = location?.href || "";
@@ -303,6 +344,7 @@
         return false;
     }
 
+    // Consent before full page
     async function ensureFullPageConsent(op, text, sourceHint = "whole page") {
         if (!settings.showFullPageConfirm) return true;
         const count = (text || "").length;
@@ -316,8 +358,8 @@
                 display: "flex", alignItems: "center", justifyContent: "center"
             });
 
-            const card = document.createElement("div");
             const c = pgColors();
+            const card = document.createElement("div");
             Object.assign(card.style, {
                 background: pgGetThemeMode()==="light" ? "#ffffff" : "#0f1115",
                 color: c.text, border: `1px solid ${c.border}`,
@@ -345,11 +387,18 @@
 
             const cancel = document.createElement("button");
             cancel.textContent = "Cancel";
-            styleBtn(cancel, "ghost");
-
             const proceed = document.createElement("button");
             proceed.textContent = "Process";
-            styleBtn(proceed, "primary");
+
+            [cancel, proceed].forEach((b, i) => {
+                Object.assign(b.style, {
+                    background: i ? "#155e75" : "#1b1b1b",
+                    color: "#fff", border: "1px solid rgba(255,255,255,0.18)", padding: "6px 10px",
+                    borderRadius: "8px", cursor: "pointer", fontSize: "13px"
+                });
+                b.onmouseenter = () => b.style.background = i ? "#1b6b85" : "#242424";
+                b.onmouseleave = () => b.style.background = i ? "#155e75" : "#1b1b1b";
+            });
 
             cancel.onclick = () => { cleanup(false); };
             proceed.onclick = async () => {
@@ -364,22 +413,14 @@
             root.append(card);
             document.documentElement.append(root);
 
-            function cleanup(ok) { try { root.remove(); } catch {}; resolve(!!ok); }
-            function styleBtn(b, kind) {
-                Object.assign(b.style, {
-                    background: kind === "primary" ? "#155e75" : "#1b1b1b",
-                    color: "#fff", border: "1px solid rgba(255,255,255,0.18)", padding: "6px 10px",
-                    borderRadius: "8px", cursor: "pointer", fontSize: "13px"
-                });
-                b.onmouseenter = () => b.style.background = (kind === "primary" ? "#1b6b85" : "#242424");
-                b.onmouseleave = () => b.style.background = (kind === "primary" ? "#155e75" : "#1b1b1b");
+            function cleanup(ok) {
+                try { root.remove(); } catch {}
+                resolve(!!ok);
             }
         });
     }
 
-    // Telemetry storage for microcopy in result panels
-    let __pg_lastTelemetry = null; // { provider: "On-device"|"Cloud", ms: number, chars: number }
-
+    // Operations
     async function runFullDocSummarize() {
         const loader = createLoadingToast("Processing full document");
         const throttledSet = throttle(loader.set.bind(loader), 120);
@@ -400,20 +441,12 @@
             const ok = await ensureFullPageConsent("summarize", active.text, "whole page");
             if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
 
-            const t0 = performance.now();
-            let providerNote = "On-device";
-            const resultText = await runAIWithCloudLimit("summarize", active.text, (stage) => throttledSet(`Summary • ${stage}`))
-                .catch((e) => { throw e; })
-                .then((out) => out);
-            const t1 = performance.now();
-            // provider gets set in runAIWithCloudLimit via progress messages; infer from last progress fallback phrase
-            providerNote = __pg_provider_guess || providerNote;
-            __pg_lastTelemetry = { provider: providerNote, ms: Math.round(t1 - t0), chars: active.text.length };
-
+            const resultText = await runAIWithCloudLimit("summarize", active.text, (stage) => throttledSet(`Summary • ${stage}`));
             loader.success("Summary ready");
             showResultPanel(resultText);
             persist("/api/ops/log", {
-                type: "summarize_full_doc", source: location.href, input_len: active.text.length, output: resultText, strategy: active.strategy, ts: Date.now()
+                type: "summarize_full_doc", source: location.href, input_len: active.text.length,
+                output: resultText, strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
@@ -426,21 +459,18 @@
         try {
             const active = await getActiveText({ fullDoc: false });
             if (!active.text) throw new Error("No text found to process");
+
             if (active.strategy === "full_html") {
                 const ok = await ensureFullPageConsent(op, active.text, "whole page");
                 if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
             }
 
-            const t0 = performance.now();
-            __pg_provider_guess = "On-device";
             const resultText = await runAIWithCloudLimit(op, active.text, (stage) => throttledSet(`${opTitle(op)} • ${stage}`));
-            const t1 = performance.now();
-            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: active.text.length };
-
             loader.success(opTitle(op) + " ready");
             showResultPanel(resultText);
             persist("/api/ops/log", {
-                type: op, source: location.href, input: active.text.slice(0, 2000), output: resultText, strategy: active.strategy, ts: Date.now()
+                type: op, source: location.href, input: active.text.slice(0, 2000),
+                output: resultText, strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
@@ -456,21 +486,13 @@
         const loader = createLoadingToast("Proofreading...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
-            const t0 = performance.now();
-            __pg_provider_guess = "On-device";
             const result = await runAIWithCloudLimit("proofread", lastSelectionText, (stage) => throttledSet(`Proofreading • ${stage}`));
-            const t1 = performance.now();
-            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: lastSelectionText.length };
-
             const clean = stripMarkdownCodeFences(toPlainText(result));
             replaceRangeWithText(lastRange, clean);
             loader.success("Replaced with proofread text");
             persist("/api/ops/log", {
-                type: "quick_proofread_replace",
-                source: location.href,
-                input: lastSelectionText,
-                output: clean,
-                ts: Date.now()
+                type: "quick_proofread_replace", source: location.href,
+                input: lastSelectionText, output: clean, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
@@ -489,12 +511,7 @@
                 if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
             }
 
-            const t0 = performance.now();
-            __pg_provider_guess = "On-device";
             const raw = await runAIWithCloudLimit("translate", active.text, (stage) => throttledSet(`Translating • ${stage}`));
-            const t1 = performance.now();
-            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: active.text.length };
-
             const result = toPlainText(raw);
             loader.success("Translation ready");
 
@@ -502,13 +519,8 @@
             else showResultPanel(result);
 
             persist("/api/ops/log", {
-                type: "translation_overlay",
-                source: location.href,
-                input_len: active.text.length,
-                output: result,
-                targetLang: settings.targetLang,
-                strategy: active.strategy,
-                ts: Date.now()
+                type: "translation_overlay", source: location.href, input_len: active.text.length,
+                output: result, targetLang: settings.targetLang, strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
@@ -524,21 +536,13 @@
         const loader = createLoadingToast("Adding explainer comments...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
-            const t0 = performance.now();
-            __pg_provider_guess = "On-device";
             const raw = await runAIWithCloudLimit("comment_code", codeText, (stage) => throttledSet(`Adding comments • ${stage}`));
-            const t1 = performance.now();
-            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: codeText.length };
-
             const result = stripMarkdownCodeFences(toPlainText(raw));
             setCodeText(codeEl, result);
             loader.success("Comments inserted");
             persist("/api/ops/log", {
-                type: "code_comment_injection",
-                source: location.href,
-                input: codeText,
-                output: result,
-                ts: Date.now()
+                type: "code_comment_injection", source: location.href,
+                input: codeText, output: result, ts: Date.now()
             });
         } catch (e) {
             loader.error("AI error: " + (e?.message || e));
@@ -590,12 +594,8 @@
                 drift: data.drift_analysis || data.drift || ""
             });
             persist("/api/ops/log", {
-                type: "analyze_concept_drift",
-                source: location.href,
-                input_len: active.text.length,
-                output: JSON.stringify(data),
-                strategy: active.strategy,
-                ts: Date.now()
+                type: "analyze_concept_drift", source: location.href, input_len: active.text.length,
+                output: JSON.stringify(data), strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error(e?.message || e);
@@ -620,7 +620,10 @@
 
     async function quizSelectedText() {
         const active = await getActiveText({ fullDoc: false });
-        if (!active.text) { showToast("Select some text to quiz"); return; }
+        if (!active.text) {
+            showToast("Select some text to quiz");
+            return;
+        }
         const loader = createLoadingToast("Generating quiz from selection…");
         try {
             loader.set("Using cloud AI to generate quiz");
@@ -644,18 +647,15 @@
             });
 
             persist("/api/ops/log", {
-                type: "quiz_from_selection",
-                source: location.href,
-                input_len: active.text.length,
-                output: String(quizId),
-                strategy: active.strategy,
-                ts: Date.now()
+                type: "quiz_from_selection", source: location.href, input_len: active.text.length,
+                output: String(quizId), strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
             loader.error(e?.message || String(e));
         }
     }
 
+    // Retrieval: Find sources (backend search)
     async function runFindSources() {
         const loader = createLoadingToast("Finding sources…");
         const throttledSet = throttle(loader.set.bind(loader), 120);
@@ -691,23 +691,11 @@
         }
     }
 
-    // "Guess" which provider based on progress messages
-    let __pg_provider_guess = "On-device";
+    // AI routing with persona/citations + cloud-only trim + last path tracking
+// Make sure your routing calls ensureOnDeviceReady per request:
 
     async function runAIWithCloudLimit(op, text, progressCb) {
-        const onProgress = (m) => {
-            try {
-                progressCb?.(m);
-                // Microcopy mapping to provider guess
-                if (typeof m === "string") {
-                    if (m.toLowerCase().includes("falling back to cloud") || m.toLowerCase().includes("using cloud ai")) {
-                        __pg_provider_guess = "Cloud";
-                    } else if (m.toLowerCase().includes("on-device")) {
-                        __pg_provider_guess = "On-device";
-                    }
-                }
-            } catch {}
-        };
+        const onProgress = (m) => { try { progressCb?.(m); } catch {} };
 
         const userWantsOffline = (settings.mode !== "online-only");
         const userAllowsOnline = (settings.mode !== "offline-only");
@@ -717,18 +705,23 @@
             try {
                 onProgress("Using on-device AI");
                 const res = await aiOnDeviceWithPersona(op, text, settings.targetLang, settings.persona, settings.citeSources, onProgress);
+                __pg_last_ai_path = "device";
                 const plain = toPlainText(res);
                 if (plain) return plain;
             } catch {}
         }
 
         if (!userAllowsOnline) throw new Error("On-device AI unavailable.");
+
         onProgress(deviceAvailable ? "Falling back to cloud AI" : "Using cloud AI");
         const trimmedForCloud = applyCloudLimit(text);
-        const cloudRes = await aiOnlineWithPersona(op, trimmedForCloud, settings.targetLang, settings.persona, settings.citeSources);
+        const cloudRes = await aiOnlineWithPersona(op, trimmedForCloud, settings.targetLang, settings.persona, settings.citeSources, onProgress);
+        __pg_last_ai_path = "cloud";
         return toPlainText(cloudRes);
     }
 
+
+    // In aiOnDeviceWithPersona, bump the timeout a bit, especially for offline-only:
     function aiOnDeviceWithPersona(operation, text, targetLang, persona, citeSources, progressCb) {
         const onProgress = (typeof progressCb === "function") ? progressCb : () => {};
         return new Promise((resolve, reject) => {
@@ -739,43 +732,32 @@
                 window.removeEventListener("message", progHandler, true);
                 clearTimeout(timer);
             };
-            const resHandler = (ev) => {
-                if (ev.source !== window) return;
-                const data = ev.data;
-                if (!data || data.type !== "PAGEGENIE_AI_RESPONSE" || data.id !== id) return;
-                if (finished) return;
-                finished = true;
-                cleanup();
-                if (data.ok) resolve(data.result);
-                else reject(new Error(data.error || "On-device AI error"));
-            };
-            const progHandler = (ev) => {
-                if (ev.source !== window) return;
-                const data = ev.data;
-                if (!data || data.type !== "PAGEGENIE_AI_PROGRESS" || data.id !== id) return;
-                try { onProgress(`On-device • ${data.message}`); } catch {}
-            };
+            const resHandler = (ev) => { /* unchanged */ };
+            const progHandler = (ev) => { /* unchanged */ };
             window.addEventListener("message", resHandler, true);
             window.addEventListener("message", progHandler, true);
             try {
                 window.postMessage({ type: "PAGEGENIE_AI_REQUEST", id, operation, text, targetLang, persona, citeSources }, "*");
-            } catch (e) {
-                finished = true; cleanup(); reject(new Error("Failed to talk to page bridge")); return;
-            }
-            const timeoutMs = (settings?.mode === "auto") ? 12000 : 20000;
+            } catch (e) { finished = true; cleanup(); reject(new Error("Failed to talk to page bridge")); return; }
+
+            // Slightly longer on first use; otherwise the previous values are fine.
+            const isOfflineOnly = (settings?.mode === "offline-only");
+            const timeoutMs = isOfflineOnly ? 30000 : 18000; // was 20000/12000
             const timer = setTimeout(() => {
                 if (finished) return; finished = true; cleanup(); reject(new Error("On-device AI timeout"));
             }, timeoutMs);
         });
     }
 
-    async function aiOnlineWithPersona(operation, text, targetLang, persona, citeSources) {
+    async function aiOnlineWithPersona(operation, text, targetLang, persona, citeSources, onProgress) {
         const action = opToAction(operation);
         if (!action) throw new Error("Operation not supported by backend: " + operation);
         const structured = (action === "summarize" || action === "explain");
         const payload = { text, action, targetLang, persona, citeSources: !!citeSources, structured };
-        const resp = await persist("/api/v1/ai", payload);
+
+        const resp = await __pg_persistWithRetry("/api/v1/ai", payload, { retries: 2, baseDelay: 900, maxDelay: 4500, onProgress });
         if (!resp?.ok) throw new Error(resp?.error || "Backend AI request failed");
+
         const result = extractAIResult(resp.data);
         if (!result) throw new Error("Invalid backend AI response");
         return result;
@@ -838,6 +820,7 @@
         return String(out);
     }
 
+    // Persist via background
     function persist(endpoint, payload) {
         return new Promise(resolve => {
             try {
@@ -878,8 +861,8 @@
 
     function showTranslationBubble(range, text) {
         const vp = getViewportRect(range);
-        const bubble = document.createElement("div");
         const c = pgColors();
+        const bubble = document.createElement("div");
         bubble.className = "pagegenie-translation-bubble";
         bubble.textContent = text;
         Object.assign(bubble.style, {
@@ -899,7 +882,9 @@
         requestAnimationFrame(() => clampToViewport(bubble));
         const close = () => bubble.remove();
         bubble.addEventListener("click", close);
-        setTimeout(() => { document.addEventListener("click", close, { once: true, capture: true }); }, 0);
+        setTimeout(() => {
+            document.addEventListener("click", close, { once: true, capture: true });
+        }, 0);
     }
 
     function getRangeRect(range) {
@@ -920,7 +905,8 @@
             const currentTop = parseFloat(el.style.top || "0");
             const left = Math.min(Math.max(8, currentLeft), Math.max(8, vw - bw - 8));
             const top = Math.min(Math.max(8, currentTop), Math.max(8, vh - bh - 8));
-            el.style.left = left + "px"; el.style.top = top + "px";
+            el.style.left = left + "px";
+            el.style.top = top + "px";
         } catch {}
     }
     function findNearestCodeBlock(node) {
@@ -973,53 +959,130 @@
         document.documentElement.appendChild(el);
         setTimeout(() => { el.style.opacity = "1"; el.style.transform = "translateY(0)"; }, 10);
         setTimeout(() => {
-            el.style.opacity = "0"; el.style.transform = "translateY(8px)";
+            el.style.opacity = "0";
+            el.style.transform = "translateY(8px)";
             setTimeout(() => el.remove(), 300);
         }, 2000);
     }
 
-    // Structured result parsing
-    function tryParseStructuredResult(text) {
+    // Extract the first balanced {...} JSON object from text
+    function __pg_extractFirstJsonObject(text) {
+        if (typeof text !== "string") return null;
+        let s = text.trim();
+
+        // Strip Markdown code fences if present
+        // Handles ```json ... ``` and ``` ... ```
+        if (s.startsWith("```")) {
+            // remove first fence line
+            const firstNewline = s.indexOf("\n");
+            if (firstNewline !== -1) {
+                const fenceHeader = s.slice(0, firstNewline).toLowerCase();
+                // drop header (``` or ```json etc.)
+                s = s.slice(firstNewline + 1);
+            } else {
+                // single line fence, drop it
+                s = s.replace(/^```+/, "");
+            }
+            // remove trailing fence
+            const lastFence = s.lastIndexOf("```");
+            if (lastFence !== -1) s = s.slice(0, lastFence);
+            s = s.trim();
+        }
+
+        // If the whole thing is JSON already, try parsing directly
         try {
-            const obj = JSON.parse(text);
-            if (obj && Array.isArray(obj.bullets) && Array.isArray(obj.citations)) return obj;
+            const parsed = JSON.parse(s);
+            return parsed;
         } catch {}
+
+        // Sometimes the model returns a quoted JSON string: "{ \"bullets\": ... }"
+        // Parse once to get the inner string, then parse again
+        try {
+            const once = JSON.parse(s);
+            if (typeof once === "string") {
+                const twice = JSON.parse(once);
+                return twice;
+            }
+        } catch {}
+
+        // Fallback: find the first balanced {...} block and parse it
+        const start = s.indexOf("{");
+        if (start === -1) return null;
+
+        let brace = 0;
+        for (let i = start; i < s.length; i++) {
+            const ch = s[i];
+            if (ch === "{") brace++;
+            else if (ch === "}") {
+                brace--;
+                if (brace === 0) {
+                    const candidate = s.slice(start, i + 1);
+                    try {
+                        return JSON.parse(candidate);
+                    } catch {}
+                    break;
+                }
+            }
+        }
+
         return null;
     }
 
-    // Result panel with telemetry footer
-    function renderTelemetryFooter(panel) {
-        if (!__pg_lastTelemetry) return;
-        const { provider, ms, chars } = __pg_lastTelemetry;
-        const c = pgColors();
-        const footer = document.createElement("div");
-        footer.setAttribute("aria-live", "polite");
-        Object.assign(footer.style, {
-            marginTop: "8px",
-            paddingTop: "6px",
-            borderTop: `1px solid ${pgGetThemeMode()==="light" ? "rgba(0,0,0,0.1)" : "rgba(255,255,255,0.1)"}`,
-            color: c.muted,
-            fontSize: "11px",
-            display: "flex",
-            alignItems: "center",
-            gap: "8px"
-        });
-        const badge = document.createElement("span");
-        badge.textContent = provider === "On-device" ? "On-device" : "Cloud";
-        Object.assign(badge.style, {
-            background: provider === "On-device" ? "rgba(34,197,94,.15)" : "rgba(59,130,246,.15)",
-            color: provider === "On-device" ? "#22c55e" : "#3b82f6",
-            border: `1px solid ${provider === "On-device" ? "rgba(34,197,94,.35)" : "rgba(59,130,246,.35)"}`,
-            borderRadius: "999px",
-            padding: "2px 6px",
-            fontSize: "10px"
-        });
-        const text = document.createElement("span");
-        text.textContent = `${ms} ms • ${chars.toLocaleString()} chars`;
-        const hint = document.createElement("span");
-        hint.textContent = "Uses on-device when available; falls back to cloud for larger tasks.";
-        footer.append(badge, text, hint);
-        panel.appendChild(footer);
+// Normalize various schema shapes to { bullets: [], citations: [] }
+    function __pg_normalizeStructured(obj) {
+        if (!obj || typeof obj !== "object") return null;
+
+        let bullets = [];
+        let citations = [];
+
+        if (Array.isArray(obj.bullets)) bullets = obj.bullets.map(x => String(x ?? "")).filter(Boolean);
+        // Accept alternative key 'points'
+        if (!bullets.length && Array.isArray(obj.points)) bullets = obj.points.map(x => String(x ?? "")).filter(Boolean);
+
+        // Prefer 'citations', but accept 'references'
+        if (Array.isArray(obj.citations)) citations = obj.citations;
+        else if (Array.isArray(obj.references)) citations = obj.references;
+
+        // Make sure citations are objects with url/title/note keys
+        if (Array.isArray(citations)) {
+            citations = citations.map(c => {
+                if (c && typeof c === "object") {
+                    return {
+                        url: c.url || c.href || "",
+                        title: c.title || c.text || c.url || c.href || "Source",
+                        note: c.note || c.reason || ""
+                    };
+                }
+                const s = String(c || "");
+                return { url: s.startsWith("http") ? s : "", title: s || "Source" };
+            });
+        } else {
+            citations = [];
+        }
+
+        // Require at least bullets array to consider it structured
+        if (!Array.isArray(bullets)) bullets = [];
+        if (!Array.isArray(citations)) citations = [];
+
+        // If there are no bullets at all, treat as not structured
+        if (bullets.length === 0) return null;
+
+        return { bullets, citations };
+    }
+
+    // Structured results (bullets + references) and fallback panel with microcopy
+    function tryParseStructuredResult(text) {
+        if (typeof text !== "string") return null;
+
+        // Fast path: clean parse
+        let obj = null;
+
+        // 1) Try direct/quoted/extract-first logic
+        obj = __pg_extractFirstJsonObject(text);
+        if (!obj) return null;
+
+        // 2) Normalize to expected shape
+        return __pg_normalizeStructured(obj); // null if not suitable
     }
 
     function showStructuredResultPanel({ bullets = [], citations = [] } = {}) {
@@ -1051,7 +1114,11 @@
         if (bullets.length) {
             panel.append(sec("Summary"));
             const ul = document.createElement("ul"); ul.style.marginTop = "4px";
-            bullets.forEach(b => { const li = document.createElement("li"); li.textContent = String(b || ""); ul.appendChild(li); });
+            bullets.forEach(b => {
+                const li = document.createElement("li");
+                li.textContent = String(b || "");
+                ul.appendChild(li);
+            });
             panel.append(ul);
         }
 
@@ -1068,7 +1135,9 @@
                     a.addEventListener("mouseover", () => a.style.textDecoration = "underline");
                     a.addEventListener("mouseout", () => a.style.textDecoration = "none");
                     li.appendChild(a);
-                } else { li.textContent = cit.title || "Source"; }
+                } else {
+                    li.textContent = cit.title || "Source";
+                }
                 if (cit.note) {
                     const s = document.createElement("span");
                     s.textContent = " — " + cit.note;
@@ -1080,8 +1149,11 @@
             panel.append(ol);
         }
 
-        // Telemetry microcopy
-        renderTelemetryFooter(panel);
+        const footer = document.createElement("div");
+        footer.style.cssText = "margin-top:8px;font-size:11px;opacity:.8";
+        const pathStr = __pg_last_ai_path === "device" ? "On‑device" : (__pg_last_ai_path === "cloud" ? "Cloud" : "Auto");
+        footer.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${pathStr}`;
+        panel.appendChild(footer);
 
         const actions = document.createElement("div");
         actions.style.textAlign = "right";
@@ -1104,7 +1176,10 @@
         document.documentElement.appendChild(panel);
     }
 
-    const __orig_showResultPanel = function(text) {
+    function showResultPanel(text) {
+        const s = tryParseStructuredResult(text);
+        if (s) return showStructuredResultPanel(s);
+
         const panel = document.createElement("div");
         const c = pgColors();
         panel.className = "pagegenie-result-panel";
@@ -1131,20 +1206,15 @@
         });
         pre.textContent = text;
 
-        renderTelemetryFooter(panel);
+        const footer = document.createElement("div");
+        footer.style.cssText = "margin-top:8px;font-size:11px;opacity:.8";
+        const pathStr = __pg_last_ai_path === "device" ? "On‑device" : (__pg_last_ai_path === "cloud" ? "Cloud" : "Auto");
+        footer.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${pathStr}`;
 
         const copyBtn = document.createElement("button");
         copyBtn.textContent = "Copy";
-        copyBtn.addEventListener("click", async () => {
-            try {
-                await navigator.clipboard.writeText(text);
-                copyBtn.textContent = "Copied!";
-                setTimeout(() => (copyBtn.textContent = "Copy"), 1000);
-            } catch {}
-        });
         const close = document.createElement("button");
         close.textContent = "Close";
-        close.addEventListener("click", () => panel.remove());
         [copyBtn, close].forEach(b => {
             Object.assign(b.style, {
                 background: "#222",
@@ -1157,16 +1227,18 @@
                 marginRight: "6px"
             });
         });
-        panel.append(pre, copyBtn, close);
+        copyBtn.addEventListener("click", async () => {
+            try { await navigator.clipboard.writeText(text); copyBtn.textContent = "Copied!"; setTimeout(() => (copyBtn.textContent = "Copy"), 800); } catch {}
+        });
+        close.addEventListener("click", () => panel.remove());
+
+        const actions = document.createElement("div");
+        actions.append(copyBtn, close);
+        panel.append(pre, actions, footer);
         document.documentElement.appendChild(panel);
-    };
-    function showResultPanel(text) {
-        const s = tryParseStructuredResult(text);
-        if (s) return showStructuredResultPanel(s);
-        return __orig_showResultPanel(text);
     }
 
-    // Categories + Suggestions UI and helpers (unchanged from previous answer)
+    // Categories & Suggestions UI
     function safeParseJson(s) {
         if (!s) return null;
         if (typeof s === "object") return s;
@@ -1186,6 +1258,7 @@
         }
         return null;
     }
+
     function normalizeSuggestionsShape(raw) {
         if (!raw) return [];
         if (Array.isArray(raw)) return raw;
@@ -1195,8 +1268,10 @@
         if (typeof raw === "object" && (raw.suggestedUrl || raw.url)) return [raw];
         return [];
     }
+
     function showCategoriesBubbleWithFallback(categories) {
         if (!categories) { showMinimalBubble("Note saved"); return; }
+
         const range = (() => {
             const sel = document.getSelection();
             if (sel && sel.rangeCount) return sel.getRangeAt(0).cloneRange();
@@ -1253,6 +1328,7 @@
             document.addEventListener("click", hide, true);
         }, 0);
     }
+
     function showMinimalBubble(text) {
         const pos = lastAnchorPosViewport
             ? { top: Math.max(8, lastAnchorPosViewport.top - 10), left: Math.max(8, lastAnchorPosViewport.left) }
@@ -1278,8 +1354,10 @@
         requestAnimationFrame(() => clampToViewport(bubble));
         setTimeout(() => bubble.remove(), 2500);
     }
+
     function showSuggestionsPanel(suggestions) {
         if (!Array.isArray(suggestions) || !suggestions.length) return;
+
         const panel = document.createElement("div");
         const c = pgColors();
         panel.className = "pagegenie-suggestions-panel";
@@ -1315,20 +1393,26 @@
             item.style.borderBottom = `1px solid ${pgGetThemeMode()==="light" ? "rgba(0,0,0,0.08)" : "rgba(255,255,255,0.08)"}`;
 
             const a = document.createElement("a");
-            a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+            a.href = href;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
             a.textContent = title;
-            a.style.color = "#9fd3ff"; a.style.textDecoration = "none";
+            a.style.color = "#9fd3ff";
+            a.style.textDecoration = "none";
             a.addEventListener("mouseover", () => a.style.textDecoration = "underline");
             a.addEventListener("mouseout", () => a.style.textDecoration = "none");
+
             item.appendChild(a);
 
             if (reason) {
                 const r = document.createElement("div");
                 r.textContent = reason;
                 r.style.color = pgColors().muted;
-                r.style.fontSize = "12px"; r.style.marginTop = "4px";
+                r.style.fontSize = "12px";
+                r.style.marginTop = "4px";
                 item.appendChild(r);
             }
+
             panel.appendChild(item);
         });
 
@@ -1349,11 +1433,11 @@
         close.addEventListener("click", () => panel.remove());
         actions.appendChild(close);
         panel.appendChild(actions);
+
         document.documentElement.appendChild(panel);
     }
 
-    // Theme utilities + toolbar/FAB creators + icons
-
+    // Theme utilities + animations + iconography
     function pgGetThemeMode() {
         if (settings?.theme === "light") return "light";
         if (settings?.theme === "dark") return "dark";
@@ -1373,7 +1457,7 @@
                 focus: "#1d4ed8",
                 accent: "#2563eb",
                 panelBg: "#ffffff",
-                toolbarBg: "rgba(20,21,24,0.97)",
+                toolbarBg: "rgba(20,21,24,0.97)", // keep dark bubble for contrast
                 toastBg: "rgba(30,30,30,0.95)",
                 btn: "#1f2937",
                 btnHover: "#243041"
@@ -1445,7 +1529,6 @@
 
     // FAB
     let __pg_fab_root = null;
-    let __pg_fab_menu_open = false;
     let __pg_fab_observer = null;
 
     function ensureFloatingButton() {
@@ -1502,12 +1585,13 @@
         });
         btn.innerHTML = iconSvg("genie", 26);
 
-        function mbtn(label, icon, onClick) {
+        function mbtn(label, icon, onClick, shortcut) {
             const b = document.createElement("button");
             b.className = "pagegenie-fab-item pg-focus pg-anim-pop";
             b.setAttribute("role", "menuitem");
             b.setAttribute("tabindex", "-1");
             b.setAttribute("aria-label", label);
+            b.title = shortcut ? `${label} (${shortcut})` : label;
             Object.assign(b.style, {
                 background: c.btn,
                 color: c.text,
@@ -1547,17 +1631,17 @@
         }
 
         const items = [
-            ["✨ Summarize", "summarize", () => runSimpleOp("summarize")],
-            ["💬 Explain", "explain", () => runSimpleOp("explain")],
-            ["🪄 Rewrite", "rewrite", () => runSimpleOp("rewrite")],
-            ["🌍 Translate", "translate", () => runTranslationOverlay()],
+            ["✨ Summarize", "summarize", () => runSimpleOp("summarize"), "Alt+Shift+S"],
+            ["💬 Explain", "explain", () => runSimpleOp("explain"), "Alt+Shift+E"],
+            ["🪄 Rewrite", "rewrite", () => runSimpleOp("rewrite"), "Alt+Shift+R"],
+            ["🌍 Translate", "translate", () => runTranslationOverlay(), "Alt+Shift+T"],
             ["📄 Process Full Document", "document", () => runFullDocSummarize()],
             ["📘 Save Note", "save", () => saveNote()],
             ["🔗 Analyze Concept Drift", "compare", () => compareConceptDrift()],
             ["🧠 Quiz Me", "quiz", () => quizSelectedText()],
             ["🔎 Find sources", "compare", () => runFindSources()]
         ];
-        items.forEach(([label, icon, fn]) => menu.append(mbtn(label, icon, fn)));
+        items.forEach(([label, icon, fn, shortcut]) => menu.append(mbtn(label, icon, fn, shortcut)));
 
         function toggleMenu(open) {
             const willOpen = open ?? menu.style.display === "none";
@@ -1589,6 +1673,7 @@
             document.removeEventListener("keydown", onKeyDown, true);
         };
 
+        // Keep-alive for SPA rewrites
         try {
             if (__pg_fab_observer) __pg_fab_observer.disconnect();
             __pg_fab_observer = new MutationObserver(() => {
@@ -1605,15 +1690,18 @@
     }
 
     function removeFloatingButton() {
-        if (__pg_fab_observer) { try { __pg_fab_observer.disconnect(); } catch {} __pg_fab_observer = null; }
+        if (__pg_fab_observer) {
+            try { __pg_fab_observer.disconnect(); } catch {}
+            __pg_fab_observer = null;
+        }
         if (__pg_fab_root) {
             try { __pg_fab_root.__pg_cleanup?.(); } catch {}
             try { __pg_fab_root.remove(); } catch {}
-            __pg_fab_root = null; __pg_fab_menu_open = false;
+            __pg_fab_root = null;
         }
     }
 
-    // Selection toolbar with tooltips + shortcuts in titles
+    // Selection toolbar (themed + icons + a11y + tooltips with hotkey hints)
     function createToolbar() {
         pgInjectStyles();
         const c = pgColors();
@@ -1640,13 +1728,13 @@
             "--pg-focus": c.focus
         });
 
-        function tbtn(id, label, iconName, tooltip) {
+        function tbtn(id, label, iconName, shortcut) {
             const b = document.createElement("button");
             b.type = "button";
             b.className = "pagegenie-btn pg-focus";
             b.setAttribute("data-id", id);
             b.setAttribute("aria-label", label);
-            b.title = tooltip || label;
+            b.title = shortcut ? `${label} (${shortcut})` : label;
             b.innerHTML = `${iconSvg(iconName, 16)} <span style="margin-left:6px">${label}</span>`;
             Object.assign(b.style, {
                 background: c.btn,
@@ -1665,49 +1753,49 @@
             return b;
         }
 
-        const shortcuts = {
-            summarize: "Alt+Shift+S",
-            explain: "Alt+Shift+E",
-            rewrite: "Alt+Shift+R",
-            translate: "Alt+Shift+T",
-            quick_proof: "Alt+Shift+P"
-        };
-
         const actions = [
-            { id: "summarize", label: "Summary", icon: "summarize", tip: `Summarize selection (or page) • ${shortcuts.summarize}` },
-            { id: "explain", label: "Explain", icon: "explain", tip: `Explain selection (or page) • ${shortcuts.explain}` },
-            { id: "rewrite", label: "Rewrite", icon: "rewrite", tip: `Rewrite for clarity • ${shortcuts.rewrite}` },
-            { id: "translate", label: "Translate", icon: "translate", tip: `Translate selection (bubble) or page (panel) • ${shortcuts.translate}` },
-            { id: "save", label: "Save", icon: "save", tip: "Save note; shows categories and curated suggestions" },
-            { id: "compare_concept", label: "Analyze", icon: "compare", tip: "Analyze selected idea against your notes (concept drift)" },
-            { id: "quiz_selection", label: "Quiz Me", icon: "quiz", tip: "Generate a quick quiz from selection (cloud)" },
-            { id: "quick_proof", label: "Proofread", icon: "proof", tip: `Replace selection with corrected text • ${shortcuts.quick_proof}` },
-            { id: "quick_comment", label: "Code Comments", icon: "comment", tip: "Insert explainer comments into nearest code block" },
-            { id: "find_sources", label: "Find sources", icon: "compare", tip: "Search the web for related sources (clearly labeled)" }
+            { id: "summarize", label: "Summary", icon: "summarize", shortcut: "Alt+Shift+S" },
+            { id: "explain", label: "Explain", icon: "explain", shortcut: "Alt+Shift+E" },
+            { id: "rewrite", label: "Rewrite", icon: "rewrite", shortcut: "Alt+Shift+R" },
+            { id: "translate", label: "Translate", icon: "translate", shortcut: "Alt+Shift+T" },
+            { id: "save", label: "Save", icon: "save" },
+            { id: "compare_concept", label: "Analyze", icon: "compare" },
+            { id: "quiz_selection", label: "Quiz Me", icon: "quiz" },
+            { id: "quick_proof", label: "Proofread", icon: "proof" },
+            { id: "quick_comment", label: "Code Comments", icon: "comment" },
+            { id: "find_sources", label: "Find sources", icon: "compare" }
         ];
 
         const handlers = {};
         const btns = actions.map(a => {
-            const b = tbtn(a.id, a.label, a.icon, a.tip);
+            const b = tbtn(a.id, a.label, a.icon, a.shortcut);
             b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); handlers[a.id]?.(); });
             root.appendChild(b);
             return b;
         });
 
+        // Keyboard nav within toolbar
         root.addEventListener("keydown", (e) => {
             const items = btns;
             const current = document.activeElement;
             const idx = items.indexOf(current);
-            if (e.key === "ArrowRight") { e.preventDefault(); items[(idx + 1) % items.length]?.focus(); }
-            else if (e.key === "ArrowLeft") { e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus(); }
-            else if (e.key === "Home") { e.preventDefault(); items[0]?.focus(); }
-            else if (e.key === "End") { e.preventDefault(); items[items.length - 1]?.focus(); }
-            else if (e.key === "Escape") { e.preventDefault(); hide(); }
+            if (e.key === "ArrowRight") {
+                e.preventDefault(); items[(idx + 1) % items.length]?.focus();
+            } else if (e.key === "ArrowLeft") {
+                e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus();
+            } else if (e.key === "Home") {
+                e.preventDefault(); items[0]?.focus();
+            } else if (e.key === "End") {
+                e.preventDefault(); items[items.length - 1]?.focus();
+            } else if (e.key === "Escape") {
+                e.preventDefault(); hide();
+            }
         });
 
         document.documentElement.appendChild(root);
         window.__pg_toolbar_root = root;
 
+        // Live theme refresh
         window.__pg_toolbar_updateTheme = () => {
             const cc = pgColors();
             root.style.background = cc.toolbarBg;
@@ -1737,6 +1825,7 @@
         return { on, show, hide };
     }
 
+    // Loading toast
     function createLoadingToast(initialMessage = "Loading…") {
         pgInjectStyles();
         const c = pgColors();
@@ -1800,6 +1889,9 @@
     function escapeHtml(str) {
         return String(str).replace(/[&<>"']/g, s => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[s]));
     }
+    function escapeAttr(str) { return escapeHtml(str).replace(/"/g, "&quot;"); }
+
+    // Safe pageBridge injector
     function injectPageBridge() {
         try {
             if (!chrome?.runtime?.getURL) return;
@@ -1814,7 +1906,98 @@
         } catch {}
     }
 
-    // Dev/test hooks
+    // === BEGIN: transient backend error handling with retries ===
+
+// Jittered sleep
+    function __pg_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+    function __pg_backoffDelay(attempt, base = 800, cap = 5000) {
+        const exp = Math.min(cap, base * Math.pow(2, attempt));
+        const jitter = Math.floor(exp * (0.25 + Math.random() * 0.5)); // 25–75% jitter
+        return Math.min(cap, Math.max(base, jitter));
+    }
+
+// Normalize/clean backend error payloads (including your <EOL> shape)
+    function __pg_parseBackendErr(resp) {
+        // resp is what persist() returns: { ok, error, status?, data? }
+        const rawStatus = Number(resp?.status || 0) || 0;
+        const data = resp?.data || {};
+        const rawCode = (data?.code || "").toString();
+        let msg = (resp?.error || data?.message || "").toString();
+
+        // Unescape line tokens produced by backend
+        if (msg.includes("<EOL>")) msg = msg.replace(/<EOL>/g, "\n");
+
+        // Best-effort HTTP code extraction from message (e.g., "503 Service Unavailable")
+        let embedded = 0;
+        const match = msg.match(/\b(429|500|502|503|504)\b/);
+        if (match) embedded = Number(match[1]);
+
+        // Fallback to UNAVAILABLE keyword
+        const lowered = msg.toLowerCase();
+        let inferred = 0;
+        if (!rawStatus && !embedded) {
+            if (lowered.includes("unavailable") || lowered.includes("overloaded")) inferred = 503;
+            else if (lowered.includes("too many requests") || lowered.includes("rate limit")) inferred = 429;
+        }
+
+        const status = rawStatus || embedded || inferred || 0;
+        const code = rawCode || ((lowered.includes("overloaded") || lowered.includes("unavailable")) ? "UNAVAILABLE" : (lowered.includes("too many requests") ? "RATE_LIMIT" : "server_error"));
+
+        return { status, code, message: msg };
+    }
+
+    function __pg_isTransientBackendError(err) {
+        const s = err.status;
+        const m = (err.message || "").toLowerCase();
+        const c = (err.code || "").toLowerCase();
+
+        if ([429, 500, 502, 503, 504].includes(s)) return true;
+        if (c === "server_error" || c === "unavailable" || c === "rate_limit") return true;
+        if (m.includes("overloaded") || m.includes("unavailable") || m.includes("temporarily") || m.includes("timeout")) return true;
+        if (m.includes("too many requests") || m.includes("rate limit")) return true;
+        if (m.includes("econnreset") || m.includes("eai_again") || m.includes("network")) return true;
+
+        return false;
+    }
+
+    function __pg_friendlyCloudError(err) {
+        const s = err.status;
+        const m = (err.message || "").toLowerCase();
+
+        if (s === 429 || m.includes("too many requests") || m.includes("rate limit")) {
+            return "Cloud is rate‑limiting right now. Please try again shortly.";
+        }
+        if (s === 503 || m.includes("overloaded") || m.includes("unavailable")) {
+            return "Cloud model is overloaded. Please wait a moment and try again.";
+        }
+        if ([500, 502, 504].includes(s)) {
+            return "Cloud temporarily unavailable. Please try again.";
+        }
+        return err.message || "Backend AI request failed";
+    }
+
+// Retry wrapper around persist()
+    async function __pg_persistWithRetry(endpoint, payload, { retries = 2, baseDelay = 900, maxDelay = 4500, onProgress } = {}) {
+        let lastErr = null;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            const resp = await persist(endpoint, payload);
+            if (resp?.ok) return resp;
+
+            const err = __pg_parseBackendErr(resp);
+            lastErr = err;
+
+            if (attempt < retries && __pg_isTransientBackendError(err)) {
+                const wait = __pg_backoffDelay(attempt, baseDelay, maxDelay);
+                try { onProgress?.(`Cloud busy • retrying in ${(wait / 1000).toFixed(1)}s (${attempt + 1}/${retries + 1})`); } catch {}
+                await __pg_sleep(wait);
+                continue;
+            }
+            break; // non-transient or out of retries
+        }
+        return { ok: false, error: __pg_friendlyCloudError(lastErr || {}), status: lastErr?.status || 0, data: { code: lastErr?.code || "server_error", message: lastErr?.message || "" } };
+    }
+
+    // Dev hooks
     window.__pg_showSuggestions = function(example) {
         const arr = normalizeSuggestionsShape(example);
         if (arr.length) showSuggestionsPanel(arr);

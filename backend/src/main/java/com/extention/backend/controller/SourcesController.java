@@ -7,6 +7,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
+
 @RestController
 @RequestMapping("/api/v1/sources")
 public class SourcesController {
@@ -24,7 +26,7 @@ public class SourcesController {
     }
 
     public record FindRequest(String text, String sourceUrl, String persona) {}
-    public record FindResponse(java.util.List<Suggestion> items) {}
+    public record FindResponse( List<Suggestion> items) {}
 
     public static class Suggestion {
         public String url;

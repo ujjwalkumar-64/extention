@@ -113,6 +113,7 @@
             const tokenValid = !!cfg.apiToken && (!cfg.tokenExp || Date.now() < Number(cfg.tokenExp));
             if (tokenValid) setSignedInUI({ name: cfg.profileName, username: cfg.profileUsername });
             else setSignedOutUI();
+            await refreshOnboardingBanner();
         } catch (e) {
             setStatus(e?.message || String(e), "err");
         }
@@ -215,5 +216,39 @@
         window.open(url, "_blank");
     });
 
+    const appEl = document.getElementById("app");
+    const obBanner = document.createElement("div");
+    Object.assign(obBanner.style, {
+        display: "none",
+        margin: "8px 0",
+        padding: "8px 10px",
+        borderRadius: "8px",
+        border: "1px solid var(--border2, rgba(0,0,0,0.12))",
+        background: "var(--surface, #171a21)",
+        color: "var(--muted, #9aa3b2)",
+        fontSize: "12px"
+    });
+    obBanner.innerHTML = `
+    <strong>Finish setup</strong> — run a quick 60‑second tour for best results.
+    <button id="openOnboarding" class="pg-btn" style="margin-left:8px">Start</button>
+  `;
+    appEl?.prepend(obBanner);
+
+    async function refreshOnboardingBanner() {
+        try {
+            const { onboardingCompleted } = await chrome.storage.sync.get({ onboardingCompleted: true });
+            obBanner.style.display = onboardingCompleted ? "none" : "block";
+        } catch {
+            obBanner.style.display = "none";
+        }
+    }
+
+    document.addEventListener("click", (e) => {
+        if (e.target && e.target.id === "openOnboarding") {
+            chrome.runtime.sendMessage({ type: "PAGEGENIE_OPEN_ONBOARDING" });
+        }
+    });
+
     bootstrap();
+
 })();

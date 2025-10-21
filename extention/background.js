@@ -155,6 +155,29 @@ function setupContextMenus() {
 chrome.runtime.onInstalled.addListener(setupContextMenus);
 chrome.runtime.onStartup.addListener(setupContextMenus);
 
+
+chrome.runtime.onInstalled.addListener(async (details) => {
+    // Initialize onboarding flags on first install
+    if (details.reason === "install") {
+        try {
+            await chrome.storage.sync.set({ onboardingCompleted: false, onboardingSampleTried: false });
+        } catch {}
+        const url = chrome.runtime.getURL("pages/onboarding.html");
+        chrome.tabs.create({ url }).catch(() => {});
+        return;
+    }
+
+    // Optional: surface onboarding on major updates if not completed yet
+    if (details.reason === "update") {
+        try {
+            const cfg = await chrome.storage.sync.get({ onboardingCompleted: true });
+            if (!cfg.onboardingCompleted) {
+                // Nudge (don’t auto-open): show badge via popup or a notification if you like
+            }
+        } catch {}
+    }
+});
+
 // ---------- Context click handling (PDF-aware) ----------
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -498,6 +521,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     return false;
+});
+
+// Allow other parts (popup) to open onboarding on demand
+chrome.runtime.onMessage.addListener((msg, _sender, _sendResponse) => {
+    if (msg?.type === "PAGEGENIE_OPEN_ONBOARDING") {
+        const url = chrome.runtime.getURL("pages/onboarding.html");
+        chrome.tabs.create({ url }).catch(() => {});
+    }
+});
+
+// Map commands -> ops understood by content script
+const CMD_TO_OP = {
+    "summarize-selection": "summarize",
+    "explain-selection": "explain",
+    "rewrite-selection": "rewrite",
+    "translate-selection": "translate",
+
+};
+
+chrome.commands.onCommand.addListener(async (command) => {
+    const op = CMD_TO_OP[command];
+    if (!op) return;
+    try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) return;
+        await chrome.tabs.sendMessage(tab.id, {
+            type: "PAGEGENIE_HOTKEY",
+            operation: op
+        });
+    } catch {
+        // No active tab or content script not injected on that page (e.g., chrome://)
+    }
 });
 
 // ---------- Helpers ----------

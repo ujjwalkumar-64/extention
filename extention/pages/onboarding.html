@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Welcome to PageGenie</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="onboarding.css" />
+</head>
+<body>
+<main class="ob-root" role="main" aria-label="PageGenie onboarding">
+    <header class="ob-header">
+        <div class="ob-title">Welcome to PageGenie</div>
+        <div class="ob-sub">A 60‑second setup to get the best experience</div>
+    </header>
+
+    <ol class="ob-steps">
+        <li class="ob-step" id="step1">
+            <h2>1) Enable “Allow access to file URLs” (optional)</h2>
+            <p>This lets PageGenie read local PDFs in the Reader. Drag & drop works even without it.</p>
+            <div class="ob-status" id="fileAccessStatus" aria-live="polite">Status: checking…</div>
+            <div class="ob-actions">
+                <button id="openExtensions" class="ob-btn">Open extensions settings</button>
+                <button id="checkFileAccess" class="ob-btn">Check again</button>
+                <button id="copyExtensionId" class="ob-btn">Copy extension ID</button>
+            </div>
+        </li>
+
+        <li class="ob-step" id="step2">
+            <h2>2) Pick your target language</h2>
+            <p>Translation and tone helpers use this as the default. You can change it later in Settings.</p>
+            <label>
+                <span>Target language</span>
+                <select id="targetLang">
+                    <option value="en">English (en)</option>
+                    <option value="hi">Hindi (hi)</option>
+                    <option value="es">Spanish (es)</option>
+                    <option value="fr">French (fr)</option>
+                    <option value="de">German (de)</option>
+                    <option value="zh">Chinese (zh)</option>
+                    <option value="ja">Japanese (ja)</option>
+                    <option value="ko">Korean (ko)</option>
+                    <option value="pt">Portuguese (pt)</option>
+                    <option value="ru">Russian (ru)</option>
+                    <option value="ar">Arabic (ar)</option>
+                    <option value="it">Italian (it)</option>
+                    <option value="bn">Bengali (bn)</option>
+                    <option value="pa">Punjabi (pa)</option>
+                    <option value="mr">Marathi (mr)</option>
+                    <option value="te">Telugu (te)</option>
+                    <option value="ta">Tamil (ta)</option>
+                    <option value="ur">Urdu (ur)</option>
+                    <option value="gu">Gujarati (gu)</option>
+                </select>
+            </label>
+            <div class="ob-status" id="langStatus" aria-live="polite">Status: not saved</div>
+            <div class="ob-actions">
+                <button id="saveLang" class="ob-btn primary">Save language</button>
+            </div>
+        </li>
+
+        <li class="ob-step" id="step3">
+            <h2>3) Try a sample PDF</h2>
+            <p>Open the Reader with a sample PDF and click “Summarize”.</p>
+            <div class="ob-status" id="sampleStatus" aria-live="polite">Status: not tried</div>
+            <div class="ob-actions">
+                <button id="openSamplePdf" class="ob-btn">Open sample PDF</button>
+            </div>
+        </li>
+    </ol>
+
+    <footer class="ob-footer">
+        <div class="ob-tip">Tip: PageGenie prefers on‑device AI when available and falls back to cloud automatically.</div>
+        <div class="ob-right">
+            <button id="done" class="ob-btn" title="Mark onboarding complete">Done</button>
+            <button id="skip" class="ob-btn" title="Skip and finish">Skip</button>
+        </div>
+    </footer>
+</main>
+<script src="onboarding.js"></script>
+</body>
+</html>
