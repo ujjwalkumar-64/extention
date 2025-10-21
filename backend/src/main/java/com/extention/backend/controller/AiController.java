@@ -13,20 +13,24 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/api/v1/ai")
+@RequestMapping({"/api/v1/ai", "/api/v1/ai"})
 public class AiController {
+
     private final AiService aiService;
 
-    @PostMapping()
+    @PostMapping
     public ResponseEntity<ExecuteResponse> execute(@RequestBody ExecuteRequest req) {
         Action action = toAction(req.action());
         if (action == null) {
             throw new IllegalArgumentException("Unsupported operation: " + req.action());
         }
-        AiRequest aiRequest = new AiRequest(req.text(), action, req.targetLang());
-        System.out.println(aiRequest.toString());
+
+        String persona = (req.persona() == null || req.persona().isBlank()) ? "general" : req.persona().trim().toLowerCase();
+        boolean citeSources = Boolean.TRUE.equals(req.citeSources());
+        boolean structured = Boolean.TRUE.equals(req.structured());
+
+        AiRequest aiRequest = new AiRequest(req.text(), action, req.targetLang(), persona, citeSources, structured);
         AiResponse aiResponse = aiService.process(aiRequest);
-        System.out.println(aiResponse.toString());
         return ResponseEntity.ok(new ExecuteResponse(aiResponse.getResult()));
     }
 
@@ -40,11 +44,11 @@ public class AiController {
             case "translate" -> Action.translate;
             case "proofread" -> Action.proofread;
             case "comment_code" -> Action.comment_code;
-            // Unknown/unsupported (e.g., "comment_code") -> return null so we 400
             default -> null;
         };
     }
 
-    public record ExecuteRequest(String action, String text, String targetLang) {}
+    // Structured flag + persona + citeSources
+    public record ExecuteRequest(String action, String text, String targetLang, String persona, Boolean citeSources, Boolean structured) {}
     public record ExecuteResponse(String output) {}
 }

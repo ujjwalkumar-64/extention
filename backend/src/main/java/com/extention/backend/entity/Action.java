@@ -6,6 +6,6 @@ public enum Action {
     explain ,
     translate,
     proofread,
-    flashcard,
+
     comment_code
 }

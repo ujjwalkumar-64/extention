@@ -1,0 +1,1 @@
+This update introduces a theme selector (System/Light/Dark) in the popup and a consistent visual design for extension UI. The content script honors the theme for PageGenie overlays (toolbar, FAB, toasts, panels), without altering page content styling. The toolbar, FAB, and toasts include ARIA and keyboard navigation for accessibility.

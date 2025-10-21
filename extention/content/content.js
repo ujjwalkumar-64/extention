@@ -1,34 +1,93 @@
-// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save)
+// - Selection toolbar (Summarize, Explain, Rewrite, Translate, Save, Quiz Me, Proofread, Code Comments, Find sources)
 // - Quick-Fix DOM Injection (Replace with Proofread, Translation Overlay, Insert Code Comments)
 // - Offline (on-device) AI via pageBridge + Online fallback via Spring Boot (/api/v1/ai)
 // - Save Note shows Categories bubble + Curated Reading side panel
 // - Robust background messaging with "extension context invalidated" guard
 // - Floating Action Button (FAB): always-visible button with vertical menu; toggle from popup (showFloatingButton)
+// - Full-page confirmation before whole-page processing (showFullPageConfirm)
+// - Cloud-only input limit (CLOUD_CHAR_LIMIT) for backend; no hard limit for on-device
+// - Persona presets + Cite Sources flag passed to AI (persona, citeSources)
+// - Structured results support for summarize/explain: { bullets: [...], citations: [...] } with References section
+// - Theme (system/light/dark) + consistent iconography + animations + accessibility (ARIA, keyboard nav)
+// - Keyboard shortcuts: Alt+Shift+S (Summarize), Alt+Shift+E (Explain), Alt+Shift+R (Rewrite), Alt+Shift+T (Translate), Alt+Shift+P (Proofread)
+// - Telemetry microcopy: small badge in results showing On-device/Cloud, time, char count
+// - FIX: Multi-word selection reliability — show toolbar on mouseup; ignore while dragging
 
 (function init() {
-    // Inject the page-bridge to access on-device AI APIs from page context (window.ai / Prompt API)
     injectPageBridge();
 
-    // Simple throttle to avoid janky frequent UI updates (≈8–12 fps)
     function throttle(fn, ms = 120) {
         let last = 0, queued = null, timer = null;
         return (msg) => {
             const now = Date.now();
             const run = (v) => { last = Date.now(); queued = null; timer = null; try { fn(v); } catch {} };
-            if (now - last >= ms) {
-                run(msg);
-            } else {
+            if (now - last >= ms) run(msg);
+            else {
                 queued = msg;
                 if (!timer) {
-                    timer = setTimeout(() => {
-                        if (queued != null) run(queued);
-                    }, ms - (now - last));
+                    timer = setTimeout(() => { if (queued != null) run(queued); }, ms - (now - last));
                 }
             }
         };
     }
 
-    // Prewarm local models just-in-time when user shows intent
+    let settings = {
+        mode: "auto",
+        showToolbarOnSelection: true,
+        showFloatingButton: false,
+        showFullPageConfirm: true,
+        targetLang: "en",
+        theme: "system",
+        persona: "general",
+        citeSources: false
+    };
+
+    chrome.storage.sync.get(
+        {
+            mode: "auto",
+            showToolbarOnSelection: true,
+            showFloatingButton: false,
+            showFullPageConfirm: true,
+            targetLang: "en",
+            theme: "system",
+            persona: "general",
+            citeSources: false
+        },
+        (s) => {
+            settings = { ...settings, ...s };
+            pgInjectStyles();
+            pgApplyTheme();
+            if (settings.mode === "offline-only") prewarmLikely();
+            if (settings.showFloatingButton) ensureFloatingButton();
+        }
+    );
+
+    const _pg_mql = window.matchMedia?.("(prefers-color-scheme: dark)") || null;
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "sync") return;
+        if (changes.mode) settings.mode = changes.mode.newValue;
+        if (changes.showToolbarOnSelection) settings.showToolbarOnSelection = changes.showToolbarOnSelection.newValue;
+        if (changes.showFloatingButton) {
+            settings.showFloatingButton = !!changes.showFloatingButton.newValue;
+            if (settings.showFloatingButton) ensureFloatingButton(); else removeFloatingButton();
+        }
+        if (changes.showFullPageConfirm) settings.showFullPageConfirm = !!changes.showFullPageConfirm.newValue;
+        if (changes.targetLang) settings.targetLang = changes.targetLang.newValue;
+        if (changes.persona) settings.persona = changes.persona.newValue;
+        if (changes.citeSources) settings.citeSources = !!changes.citeSources.newValue;
+        if (changes.theme) {
+            settings.theme = changes.theme.newValue || "system";
+            pgApplyTheme();
+            try { __pg_toolbar_updateTheme?.(); } catch {}
+        }
+    });
+    _pg_mql?.addEventListener?.("change", () => {
+        if (settings.theme === "system") {
+            pgApplyTheme();
+            try { __pg_toolbar_updateTheme?.(); } catch {}
+        }
+    });
+
     let __pg_prewarmed = false;
     function prewarmLikely() {
         if (__pg_prewarmed) return;
@@ -43,19 +102,10 @@
         } catch {}
     }
 
-    // Trim large inputs for fast on-device operations (not for translate/proofread/code-comment)
-    function trimForLocal(op, text, limit = 8000) {
-        if (!text || typeof text !== "string") return text;
-        if (op === "translate" || op === "proofread" || op === "comment_code") return text;
-        if (text.length <= limit) return text;
-        return text.slice(0, limit) + "\n\n[...trimmed for speed on device…]";
-    }
-
     let onDeviceReady = null;
     async function ensureOnDeviceReady() {
         if (onDeviceReady !== null) return onDeviceReady;
         onDeviceReady = new Promise((resolve) => {
-            // If content script cannot talk to page, assume false after timeout
             let done = false;
             const finish = (val) => { if (done) return; done = true; resolve(!!val); };
             const handler = (ev) => {
@@ -67,50 +117,42 @@
             };
             window.addEventListener("message", handler, true);
             try { window.postMessage({ type: "PAGEGENIE_AI_PING" }, "*"); } catch {}
-            setTimeout(() => finish(false), 800); // quick probe timeout
+            setTimeout(() => finish(false), 800);
         });
         return onDeviceReady;
     }
 
-    let settings = {
-        mode: "auto", // "auto" | "offline-only" | "online-only"
-        showToolbarOnSelection: true,
-        showFloatingButton: false,
-        showFullPageConfirm: true,
-        targetLang: "en"
-    };
+    const CLOUD_CHAR_LIMIT = 20000;
+    function applyCloudLimit(text) {
+        if (!text || text.length <= CLOUD_CHAR_LIMIT) return text;
+        const suffix = `\n\n[truncated to ${CLOUD_CHAR_LIMIT.toLocaleString()} of ${text.length.toLocaleString()} chars for cloud processing]`;
+        return text.slice(0, CLOUD_CHAR_LIMIT) + suffix;
+    }
 
-    chrome.storage.sync.get(
-        { mode: "auto", showToolbarOnSelection: true, showFloatingButton: false, showFullPageConfirm: true, targetLang: "en" },
-        s => {
-            settings = { ...settings, ...s };
+    // Keyboard shortcuts (Alt+Shift+Key)
+    document.addEventListener("keydown", async (e) => {
+        // Ignore if inside input/textarea/contenteditable or modifier keys not pressed
+        const target = e.target;
+        const isInput = target && (
+            target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.isContentEditable
+        );
+        if (isInput) return;
+        if (!(e.altKey && e.shiftKey)) return;
 
-            // Safety: if storage returns a non-boolean (or missing), force default true
-            if (typeof settings.showFullPageConfirm !== "boolean") {
-                settings.showFullPageConfirm = true;
-            }
+        const key = e.key.toLowerCase();
+        const sel = document.getSelection();
+        const hasSelection = sel && !sel.isCollapsed && String(sel.toString() || "").trim().length > 0;
 
-            // If offline-only mode is enabled, try to prewarm as soon as possible
-            if (settings.mode === "offline-only") {
-                prewarmLikely();
-            }
-            if (settings.showFloatingButton) {
-                ensureFloatingButton();
-            }
-        }
-    );
-
-    chrome.storage.onChanged.addListener((changes, area) => {
-        if (area !== "sync") return;
-        if (changes.mode) settings.mode = changes.mode.newValue;
-        if (changes.showToolbarOnSelection) settings.showToolbarOnSelection = changes.showToolbarOnSelection.newValue;
-        if (changes.showFloatingButton) {
-            settings.showFloatingButton = !!changes.showFloatingButton.newValue;
-            if (settings.showFloatingButton) ensureFloatingButton(); else removeFloatingButton();
-        }
-        if (changes.showFullPageConfirm) settings.showFullPageConfirm = !!changes.showFullPageConfirm.newValue; // NEW
-        if (changes.targetLang) settings.targetLang = changes.targetLang.newValue;
-    });
+        try {
+            if (key === "s") { e.preventDefault(); hasSelection ? runSimpleOp("summarize") : runFullDocSummarize(); }
+            else if (key === "e") { e.preventDefault(); hasSelection ? runSimpleOp("explain") : runSimpleOp("explain"); }
+            else if (key === "r") { e.preventDefault(); hasSelection ? runSimpleOp("rewrite") : runSimpleOp("rewrite"); }
+            else if (key === "t") { e.preventDefault(); runTranslationOverlay(); }
+            else if (key === "p") { e.preventDefault(); replaceWithProofread(); }
+        } catch {}
+    }, true);
 
     // Selection toolbar
     const toolbar = createToolbar();
@@ -118,42 +160,65 @@
     let lastRange = null;
     let lastAnchorPos = null;
     let lastAnchorPosViewport = null;
-    const __pg_loaders = new Map();
 
+    // Fix: multi-word selection reliability
+    let __pg_isMouseDown = false;
+    document.addEventListener("mousedown", (e) => {
+        const inOwnUi =
+            (window.__pg_toolbar_root && window.__pg_toolbar_root.contains(e.target)) ||
+            (__pg_fab_root && __pg_fab_root.contains(e.target));
+        if (inOwnUi) return;
+        __pg_isMouseDown = true;
+        toolbar.hide();
+    }, true);
+
+    document.addEventListener("mouseup", () => {
+        __pg_isMouseDown = false;
+        setTimeout(() => {
+            if (!settings.showToolbarOnSelection) return;
+            const selection = document.getSelection();
+            if (!selection || selection.isCollapsed) { toolbar.hide(); return; }
+            const text = selection.toString().trim();
+            if (!text) { toolbar.hide(); return; }
+
+            lastSelectionText = text;
+            try { lastRange = selection.getRangeAt(0).cloneRange(); } catch { lastRange = null; }
+
+            if (lastRange) {
+                const rectPage = getRangeRect(lastRange);
+                toolbar.show(rectPage);
+                lastAnchorPos = { top: rectPage.top, left: rectPage.left };
+                const rectViewport = getViewportRect(lastRange);
+                lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
+            }
+            if (settings.mode !== "online-only") prewarmLikely();
+        }, 0);
+    }, true);
+
+    // Keep selectionchange for keyboard-selection
     document.addEventListener("selectionchange", () => {
-        if (!settings.showToolbarOnSelection) {
-            toolbar.hide();
-            return;
-        }
+        if (__pg_isMouseDown) return;
+        if (!settings.showToolbarOnSelection) { toolbar.hide(); return; }
         const selection = document.getSelection();
         if (!selection || selection.isCollapsed) { toolbar.hide(); return; }
         const text = selection.toString().trim();
         if (!text) { toolbar.hide(); return; }
 
         lastSelectionText = text;
-        lastRange = selection.getRangeAt(0).cloneRange();
+        try { lastRange = selection.getRangeAt(0).cloneRange(); } catch { lastRange = null; }
 
-        // Absolute coords for toolbar
-        const rectPage = getRangeRect(lastRange);
-        toolbar.show(rectPage);
-        lastAnchorPos = { top: rectPage.top, left: rectPage.left };
-
-        // Viewport coords for bubbles
-        const rectViewport = getViewportRect(lastRange);
-        lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
-
-        // JIT prewarm once when user shows intent (unless online-only)
+        if (lastRange) {
+            const rectPage = getRangeRect(lastRange);
+            toolbar.show(rectPage);
+            lastAnchorPos = { top: rectPage.top, left: rectPage.left };
+            const rectViewport = getViewportRect(lastRange);
+            lastAnchorPosViewport = { top: rectViewport.top, left: rectViewport.left };
+        }
         if (settings.mode !== "online-only") prewarmLikely();
     });
 
-    document.addEventListener("mouseup", () => {
-        setTimeout(() => {
-            const sel = document.getSelection();
-            if (!sel || sel.isCollapsed) toolbar.hide();
-        }, 50);
-    });
-
-    // Handle context menu relay and toasts from background + background-driven loaders
+    // Background messaging: context menu + loaders
+    const __pg_loaders = new Map();
     chrome.runtime.onMessage.addListener((msg) => {
         if (msg?.type === "PAGEGENIE_CONTEXT_ACTION") {
             if (msg.operation === "process_full") runFullDocSummarize();
@@ -165,9 +230,7 @@
                 if (msg.operation === "quick_comment") insertCodeComments();
             }
         }
-        if (msg?.type === "PAGEGENIE_TOAST" && msg.message) {
-            showToast(msg.message);
-        }
+        if (msg?.type === "PAGEGENIE_TOAST" && msg.message) showToast(msg.message);
         if (msg?.type !== "PAGEGENIE_LOADING") return;
 
         const id = msg.requestId || "default";
@@ -177,25 +240,16 @@
             __pg_loaders.set(id, loader);
             return;
         }
-
         const loader = __pg_loaders.get(id);
         if (!loader) return;
 
-        if (msg.action === "set") {
-            loader.set(msg.message || "Working…");
-        } else if (msg.action === "success") {
-            loader.success(msg.message || "Done");
-            __pg_loaders.delete(id);
-        } else if (msg.action === "error") {
-            loader.error(msg.message || "Error");
-            __pg_loaders.delete(id);
-        } else if (msg.action === "close") {
-            loader.close();
-            __pg_loaders.delete(id);
-        }
+        if (msg.action === "set") loader.set(msg.message || "Working…");
+        else if (msg.action === "success") { loader.success(msg.message || "Done"); __pg_loaders.delete(id); }
+        else if (msg.action === "error") { loader.error(msg.message || "Error"); __pg_loaders.delete(id); }
+        else if (msg.action === "close") { loader.close(); __pg_loaders.delete(id); }
     });
 
-    // Toolbar actions
+    // Toolbar bindings
     toolbar.on("summarize", () => runSimpleOp("summarize"));
     toolbar.on("explain", () => runSimpleOp("explain"));
     toolbar.on("rewrite", () => runSimpleOp("rewrite"));
@@ -203,38 +257,17 @@
     toolbar.on("save", () => saveNote());
     toolbar.on("compare_concept", () => compareConceptDrift());
     toolbar.on("quiz_selection", () => quizSelectedText());
-    // Quick-Fix DOM Injection actions
     toolbar.on("quick_proof", () => replaceWithProofread());
-    toolbar.on("quick_overlay", () => runTranslationOverlay());
     toolbar.on("quick_comment", () => insertCodeComments());
+    toolbar.on("find_sources", () => runFindSources());
 
-    // Unified active text resolver (no in-page PDF parsing anymore)
     async function getActiveText({ fullDoc = false } = {}) {
-        // 1) Prefer DOM selection
         const sel = document.getSelection();
         const selected = sel && !sel.isCollapsed ? String(sel.toString() || "").trim() : "";
-        if (selected) {
-            return { text: selected, strategy: "selection" };
-        }
-
-        // 2) Full document requested: return HTML text only (PDF handled by Reader)
-        if (fullDoc) {
-            return { text: getWholePageText(), strategy: "full_html" };
-        }
-
-        // 3) Default: whole page text
+        if (selected) return { text: selected, strategy: "selection" };
+        if (fullDoc) return { text: getWholePageText(), strategy: "full_html" };
         return { text: getWholePageText(), strategy: "full_html" };
     }
-
-    // CLOUD LIMIT (applies only when sending to backend)
-    const CLOUD_CHAR_LIMIT = 20000; // adjust as desired
-
-    function applyCloudLimit(text) {
-        if (!text || text.length <= CLOUD_CHAR_LIMIT) return text;
-        const suffix = `\n\n[truncated to ${CLOUD_CHAR_LIMIT.toLocaleString()} of ${text.length.toLocaleString()} chars for cloud processing]`;
-        return text.slice(0, CLOUD_CHAR_LIMIT) + suffix;
-    }
-
 
     function getWholePageText() {
         const body = document.body;
@@ -259,8 +292,6 @@
         return text;
     }
 
-
-    // Helper: heuristic to decide “this tab looks like a PDF page”
     function looksLikePdfPage() {
         try { if (document.contentType === "application/pdf") return true; } catch {}
         const href = location?.href || "";
@@ -272,15 +303,93 @@
         return false;
     }
 
-//   runFullDocSummarize — ask for consent if there’s no selection; do not pre-trim for device
+    async function ensureFullPageConsent(op, text, sourceHint = "whole page") {
+        if (!settings.showFullPageConfirm) return true;
+        const count = (text || "").length;
+        return await confirmFullPageModal(op, count, sourceHint);
+    }
+    function confirmFullPageModal(op, charCount, sourceHint) {
+        return new Promise((resolve) => {
+            const root = document.createElement("div");
+            Object.assign(root.style, {
+                position: "fixed", inset: "0", background: "rgba(0,0,0,0.45)", zIndex: "2147483647",
+                display: "flex", alignItems: "center", justifyContent: "center"
+            });
+
+            const card = document.createElement("div");
+            const c = pgColors();
+            Object.assign(card.style, {
+                background: pgGetThemeMode()==="light" ? "#ffffff" : "#0f1115",
+                color: c.text, border: `1px solid ${c.border}`,
+                borderRadius: "10px", width: "min(520px, 90vw)", padding: "16px 18px", boxShadow: "0 12px 36px rgba(0,0,0,0.4)",
+                fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+            });
+
+            const title = document.createElement("div");
+            title.textContent = "Process full page?";
+            Object.assign(title.style, { fontWeight: "800", marginBottom: "6px" });
+
+            const msg = document.createElement("div");
+            msg.innerHTML = `You’re about to run <b>${escapeHtml(opTitle(op))}</b> on the ${escapeHtml(sourceHint)}.<br/>Estimated size: <b>${charCount.toLocaleString()}</b> characters.`;
+            Object.assign(msg.style, { color: c.muted, fontSize: "13px", marginBottom: "10px" });
+
+            const dontAskWrap = document.createElement("label");
+            dontAskWrap.setAttribute("for", "pg-dontask");
+            const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "pg-dontask";
+            const txt = document.createElement("span"); txt.textContent = " Don’t ask again for full-page actions";
+            dontAskWrap.append(cb, txt);
+            Object.assign(dontAskWrap.style, { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", color: c.muted });
+
+            const row = document.createElement("div");
+            Object.assign(row.style, { display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
+
+            const cancel = document.createElement("button");
+            cancel.textContent = "Cancel";
+            styleBtn(cancel, "ghost");
+
+            const proceed = document.createElement("button");
+            proceed.textContent = "Process";
+            styleBtn(proceed, "primary");
+
+            cancel.onclick = () => { cleanup(false); };
+            proceed.onclick = async () => {
+                if (cb.checked) {
+                    try { await chrome.storage.sync.set({ showFullPageConfirm: false }); settings.showFullPageConfirm = false; } catch {}
+                }
+                cleanup(true);
+            };
+
+            row.append(cancel, proceed);
+            card.append(title, msg, dontAskWrap, row);
+            root.append(card);
+            document.documentElement.append(root);
+
+            function cleanup(ok) { try { root.remove(); } catch {}; resolve(!!ok); }
+            function styleBtn(b, kind) {
+                Object.assign(b.style, {
+                    background: kind === "primary" ? "#155e75" : "#1b1b1b",
+                    color: "#fff", border: "1px solid rgba(255,255,255,0.18)", padding: "6px 10px",
+                    borderRadius: "8px", cursor: "pointer", fontSize: "13px"
+                });
+                b.onmouseenter = () => b.style.background = (kind === "primary" ? "#1b6b85" : "#242424");
+                b.onmouseleave = () => b.style.background = (kind === "primary" ? "#155e75" : "#1b1b1b");
+            }
+        });
+    }
+
+    // Telemetry storage for microcopy in result panels
+    let __pg_lastTelemetry = null; // { provider: "On-device"|"Cloud", ms: number, chars: number }
+
     async function runFullDocSummarize() {
         const loader = createLoadingToast("Processing full document");
         const throttledSet = throttle(loader.set.bind(loader), 120);
-
         try {
             if (looksLikePdfPage()) {
                 throttledSet("Opening Reader for PDF…");
-                chrome.runtime.sendMessage({ type: "PAGEGENIE_OPEN_READER", op: "summarize_full", src: location.href }, () => {});
+                chrome.runtime.sendMessage(
+                    { type: "PAGEGENIE_OPEN_READER", op: "summarize_full", src: location.href },
+                    () => {}
+                );
                 loader.success("Reader opened");
                 return;
             }
@@ -288,12 +397,19 @@
             const active = await getActiveText({ fullDoc: true });
             if (!active.text) throw new Error("No text found in document");
 
-            // Confirm full page
             const ok = await ensureFullPageConsent("summarize", active.text, "whole page");
             if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
 
-            // No device pre-trim; enforce cloud limit only if we end up using cloud
-            const resultText = await runAIWithCloudLimit("summarize", active.text, throttledSet);
+            const t0 = performance.now();
+            let providerNote = "On-device";
+            const resultText = await runAIWithCloudLimit("summarize", active.text, (stage) => throttledSet(`Summary • ${stage}`))
+                .catch((e) => { throw e; })
+                .then((out) => out);
+            const t1 = performance.now();
+            // provider gets set in runAIWithCloudLimit via progress messages; infer from last progress fallback phrase
+            providerNote = __pg_provider_guess || providerNote;
+            __pg_lastTelemetry = { provider: providerNote, ms: Math.round(t1 - t0), chars: active.text.length };
+
             loader.success("Summary ready");
             showResultPanel(resultText);
             persist("/api/ops/log", {
@@ -304,21 +420,23 @@
         }
     }
 
-
-    //  runSimpleOp — if it falls back to full page (no selection), ask consent; no device pre-trim; cloud-only limit
     async function runSimpleOp(op) {
         const loader = createLoadingToast("Preparing " + opTitle(op));
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
             const active = await getActiveText({ fullDoc: false });
             if (!active.text) throw new Error("No text found to process");
-
             if (active.strategy === "full_html") {
                 const ok = await ensureFullPageConsent(op, active.text, "whole page");
                 if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
             }
 
+            const t0 = performance.now();
+            __pg_provider_guess = "On-device";
             const resultText = await runAIWithCloudLimit(op, active.text, (stage) => throttledSet(`${opTitle(op)} • ${stage}`));
+            const t1 = performance.now();
+            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: active.text.length };
+
             loader.success(opTitle(op) + " ready");
             showResultPanel(resultText);
             persist("/api/ops/log", {
@@ -329,10 +447,7 @@
         }
     }
 
-
-    // Quick-Fix: Replace selection with proofread text
     async function replaceWithProofread() {
-        // Only possible when we have a DOM selection we can replace (not on PDF plugin)
         const sel = document.getSelection();
         if (!sel || sel.isCollapsed || !lastRange || !lastSelectionText) {
             showToast("Select text to proofread");
@@ -341,17 +456,20 @@
         const loader = createLoadingToast("Proofreading...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
-            const raw = await runAI("proofread", lastSelectionText, settings.targetLang, (stage) => {
-                throttledSet(`Proofreading • ${stage}`);
-            });
-            const result = stripMarkdownCodeFences(toPlainText(raw)); // ensure string, then strip fences if any
-            replaceRangeWithText(lastRange, result);
+            const t0 = performance.now();
+            __pg_provider_guess = "On-device";
+            const result = await runAIWithCloudLimit("proofread", lastSelectionText, (stage) => throttledSet(`Proofreading • ${stage}`));
+            const t1 = performance.now();
+            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: lastSelectionText.length };
+
+            const clean = stripMarkdownCodeFences(toPlainText(result));
+            replaceRangeWithText(lastRange, clean);
             loader.success("Replaced with proofread text");
             persist("/api/ops/log", {
                 type: "quick_proofread_replace",
                 source: location.href,
                 input: lastSelectionText,
-                output: result,
+                output: clean,
                 ts: Date.now()
             });
         } catch (e) {
@@ -359,7 +477,6 @@
         }
     }
 
-    // Quick-Fix: Translation overlay bubble
     async function runTranslationOverlay() {
         const loader = createLoadingToast("Translating...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
@@ -367,24 +484,22 @@
             const active = await getActiveText({ fullDoc: false });
             if (!active.text) throw new Error("No text found to translate");
 
-            // NEW: confirm when we're about to translate the entire page
             if (active.strategy === "full_html") {
                 const ok = await ensureFullPageConsent("translate", active.text, "whole page");
                 if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
             }
 
-            const raw = await runAIWithCloudLimit("translate", active.text, (stage) => {
-                throttledSet(`Translating • ${stage}`);
-            });
+            const t0 = performance.now();
+            __pg_provider_guess = "On-device";
+            const raw = await runAIWithCloudLimit("translate", active.text, (stage) => throttledSet(`Translating • ${stage}`));
+            const t1 = performance.now();
+            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: active.text.length };
+
             const result = toPlainText(raw);
             loader.success("Translation ready");
 
-            // If we had a selection range on HTML, show bubble; otherwise show panel
-            if (active.strategy === "selection" && lastRange) {
-                showTranslationBubble(lastRange, result);
-            } else {
-                showResultPanel(result);
-            }
+            if (active.strategy === "selection" && lastRange) showTranslationBubble(lastRange, result);
+            else showResultPanel(result);
 
             persist("/api/ops/log", {
                 type: "translation_overlay",
@@ -399,7 +514,7 @@
             loader.error("AI error: " + (e?.message || e));
         }
     }
-    // Quick-Fix: Insert code comments in nearest code block
+
     async function insertCodeComments() {
         const codeEl = findNearestCodeBlock(getSelectionAnchorNode());
         if (!codeEl) { showToast("No code block detected"); return; }
@@ -409,9 +524,12 @@
         const loader = createLoadingToast("Adding explainer comments...");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
-            const raw = await runAI("comment_code", codeText, settings.targetLang, (stage) => {
-                throttledSet(`Adding comments • ${stage}`);
-            });
+            const t0 = performance.now();
+            __pg_provider_guess = "On-device";
+            const raw = await runAIWithCloudLimit("comment_code", codeText, (stage) => throttledSet(`Adding comments • ${stage}`));
+            const t1 = performance.now();
+            __pg_lastTelemetry = { provider: __pg_provider_guess || "On-device", ms: Math.round(t1 - t0), chars: codeText.length };
+
             const result = stripMarkdownCodeFences(toPlainText(raw));
             setCodeText(codeEl, result);
             loader.success("Comments inserted");
@@ -427,7 +545,6 @@
         }
     }
 
-    // Save note: persist to backend, show categories bubble, then curated reading panel
     async function saveNote() {
         const active = await getActiveText({ fullDoc: false });
         if (!active.text) return showToast("No text to save");
@@ -458,7 +575,6 @@
         }
     }
 
-    // Analyze Concept Drift
     async function compareConceptDrift() {
         const active = await getActiveText({ fullDoc: false });
         if (!active.text) { showToast("Select some text"); return; }
@@ -485,7 +601,6 @@
             loader.error(e?.message || e);
         }
     }
-
     function sendCompareConcept(selectionText, pageUrl) {
         return new Promise((resolve) => {
             if (!chrome?.runtime?.id) {
@@ -503,13 +618,9 @@
         });
     }
 
-    // Quiz from selection
     async function quizSelectedText() {
         const active = await getActiveText({ fullDoc: false });
-        if (!active.text) {
-            showToast("Select some text to quiz");
-            return;
-        }
+        if (!active.text) { showToast("Select some text to quiz"); return; }
         const loader = createLoadingToast("Generating quiz from selection…");
         try {
             loader.set("Using cloud AI to generate quiz");
@@ -545,11 +656,59 @@
         }
     }
 
-    //   Route that avoids device trimming and enforces cloud-only limit automatically
-    async function runAIWithCloudLimit(op, text, progressCb) {
-        const onProgress = (m) => { try { progressCb?.(m); } catch {} };
+    async function runFindSources() {
+        const loader = createLoadingToast("Finding sources…");
+        const throttledSet = throttle(loader.set.bind(loader), 120);
+        try {
+            const active = await getActiveText({ fullDoc: false });
+            if (!active.text) throw new Error("No text found to analyze");
 
-        // Try on-device first (no limit)
+            if (active.strategy === "full_html") {
+                const ok = await ensureFullPageConsent("find_sources", active.text, "whole page");
+                if (!ok) { loader.set("Cancelled"); setTimeout(() => loader.close(), 600); return; }
+            }
+
+            throttledSet("Querying search backend");
+            const resp = await persist("/api/v1/sources/find", {
+                text: active.text,
+                sourceUrl: location.href,
+                persona: settings.persona
+            });
+
+            if (!resp?.ok) throw new Error(resp?.error || "Search backend error");
+            const data = resp.data || {};
+            const items = Array.isArray(data.items) ? data.items : (Array.isArray(data) ? data : []);
+
+            showStructuredResultPanel({
+                bullets: [],
+                citations: items.map(it => ({
+                    url: it.url, title: it.title, note: (it.reason ? (it.reason + " — found by search") : "found by search")
+                }))
+            });
+            loader.success("Sources ready");
+        } catch (e) {
+            loader.error("Error: " + (e?.message || e));
+        }
+    }
+
+    // "Guess" which provider based on progress messages
+    let __pg_provider_guess = "On-device";
+
+    async function runAIWithCloudLimit(op, text, progressCb) {
+        const onProgress = (m) => {
+            try {
+                progressCb?.(m);
+                // Microcopy mapping to provider guess
+                if (typeof m === "string") {
+                    if (m.toLowerCase().includes("falling back to cloud") || m.toLowerCase().includes("using cloud ai")) {
+                        __pg_provider_guess = "Cloud";
+                    } else if (m.toLowerCase().includes("on-device")) {
+                        __pg_provider_guess = "On-device";
+                    }
+                }
+            } catch {}
+        };
+
         const userWantsOffline = (settings.mode !== "online-only");
         const userAllowsOnline = (settings.mode !== "offline-only");
         const deviceAvailable = userWantsOffline ? await ensureOnDeviceReady() : false;
@@ -557,71 +716,20 @@
         if (userWantsOffline && deviceAvailable) {
             try {
                 onProgress("Using on-device AI");
-                const res = await aiOnDevice(op, text, settings.targetLang, onProgress);
+                const res = await aiOnDeviceWithPersona(op, text, settings.targetLang, settings.persona, settings.citeSources, onProgress);
                 const plain = toPlainText(res);
                 if (plain) return plain;
-            } catch {
-                // fall through to cloud
-            }
+            } catch {}
         }
 
-        if (!userAllowsOnline) {
-            throw new Error("On-device AI unavailable.");
-        }
-
+        if (!userAllowsOnline) throw new Error("On-device AI unavailable.");
         onProgress(deviceAvailable ? "Falling back to cloud AI" : "Using cloud AI");
-        const trimmedForCloud = applyCloudLimit(text); // enforce cloud-only cap
-        const cloudRes = await aiOnline(op, trimmedForCloud, settings.targetLang);
+        const trimmedForCloud = applyCloudLimit(text);
+        const cloudRes = await aiOnlineWithPersona(op, trimmedForCloud, settings.targetLang, settings.persona, settings.citeSources);
         return toPlainText(cloudRes);
     }
 
-    // AI routing: offline → online (or per settings), with per-op availability
-    async function runAI(op, text, targetLang, progressCb) {
-        const onProgress = (typeof progressCb === "function") ? progressCb : () => {};
-        const userWantsOffline = (settings.mode !== "online-only");
-        const userAllowsOnline = (settings.mode !== "offline-only");
-
-        // Detect if on-device APIs are present (any)
-        const deviceAvailable = userWantsOffline ? await ensureOnDeviceReady() : false;
-
-        if (userWantsOffline && deviceAvailable) {
-            try {
-                onProgress("Using on-device AI");
-                const res = await aiOnDevice(op, text, targetLang, onProgress);
-                if (res) return res;
-            } catch {
-                // fall through to cloud
-            }
-        }
-
-        if (!userAllowsOnline) {
-            // Strict offline-only and device unavailable → throw
-            throw new Error("On-device AI unavailable.");
-        }
-
-        onProgress(deviceAvailable ? "Falling back to cloud AI" : "Using cloud AI");
-        const online = await aiOnline(op, text, targetLang);
-        if (!online) throw new Error("Backend AI unavailable.");
-        return online;
-    }
-
-    // Safe pageBridge injector (content world; pageBridge must NOT call chrome.*)
-    function injectPageBridge() {
-        try {
-            if (!chrome?.runtime?.getURL) return;
-            const src = chrome.runtime.getURL("content/pageBridge.js");
-            if (document.getElementById("pagegenie-bridge-script")) return;
-            if (document.documentElement.querySelector(`script[src="${src}"]`)) return;
-            const script = document.createElement("script");
-            script.id = "pagegenie-bridge-script";
-            script.src = src;
-            script.type = "text/javascript";
-            (document.head || document.documentElement).appendChild(script);
-        } catch {}
-    }
-
-    // aiOnDevice with standard cleanup + progress forward
-    function aiOnDevice(operation, text, targetLang, progressCb) {
+    function aiOnDeviceWithPersona(operation, text, targetLang, persona, citeSources, progressCb) {
         const onProgress = (typeof progressCb === "function") ? progressCb : () => {};
         return new Promise((resolve, reject) => {
             const id = "pg_" + Math.random().toString(36).slice(2);
@@ -650,35 +758,24 @@
             window.addEventListener("message", resHandler, true);
             window.addEventListener("message", progHandler, true);
             try {
-                window.postMessage({ type: "PAGEGENIE_AI_REQUEST", id, operation, text, targetLang }, "*");
+                window.postMessage({ type: "PAGEGENIE_AI_REQUEST", id, operation, text, targetLang, persona, citeSources }, "*");
             } catch (e) {
-                finished = true;
-                cleanup();
-                reject(new Error("Failed to talk to page bridge"));
-                return;
+                finished = true; cleanup(); reject(new Error("Failed to talk to page bridge")); return;
             }
-            // Faster fallback in Auto mode, longer in Offline-only
             const timeoutMs = (settings?.mode === "auto") ? 12000 : 20000;
             const timer = setTimeout(() => {
-                if (finished) return;
-                finished = true;
-                cleanup();
-                reject(new Error("On-device AI timeout"));
+                if (finished) return; finished = true; cleanup(); reject(new Error("On-device AI timeout"));
             }, timeoutMs);
         });
     }
 
-    // Online AI via Spring Boot backend (/api/v1/ai)
-    async function aiOnline(operation, text, targetLang) {
+    async function aiOnlineWithPersona(operation, text, targetLang, persona, citeSources) {
         const action = opToAction(operation);
-        if (!action) {
-            throw new Error("Operation not supported by backend: " + operation);
-        }
-
-        const payload = { text, action, targetLang };
+        if (!action) throw new Error("Operation not supported by backend: " + operation);
+        const structured = (action === "summarize" || action === "explain");
+        const payload = { text, action, targetLang, persona, citeSources: !!citeSources, structured };
         const resp = await persist("/api/v1/ai", payload);
         if (!resp?.ok) throw new Error(resp?.error || "Backend AI request failed");
-
         const result = extractAIResult(resp.data);
         if (!result) throw new Error("Invalid backend AI response");
         return result;
@@ -722,33 +819,25 @@
     function toPlainText(out) {
         if (out == null) return "";
         if (typeof out === "string") return out;
-
-        // Common shapes from task APIs or LLMs
         if (typeof out === "object") {
             if (typeof out.text === "string") return out.text;
             if (typeof out.corrected === "string") return out.corrected;
             if (typeof out.correctedText === "string") return out.correctedText;
             if (typeof out.result === "string") return out.result;
             if (typeof out.output === "string") return out.output;
-            if (Array.isArray(out.choices) && typeof out.choices[0]?.text === "string") {
-                return out.choices[0].text;
-            }
+            if (Array.isArray(out.choices) && typeof out.choices[0]?.text === "string") return out.choices[0].text;
             if (Array.isArray(out.candidates)) {
-                // Gemini-like { candidates: [{content:{parts:[{text:"..."}]}}] }
                 const parts = out.candidates[0]?.content?.parts;
                 if (Array.isArray(parts)) {
                     const s = parts.map(p => typeof p?.text === "string" ? p.text : "").join("\n").trim();
                     if (s) return s;
                 }
             }
-            // Fallback: stringify
             try { return JSON.stringify(out); } catch { return String(out); }
         }
-
         return String(out);
     }
 
-    // Robust persist with invalidated-context and lastError handling
     function persist(endpoint, payload) {
         return new Promise(resolve => {
             try {
@@ -774,7 +863,6 @@
     }
 
     // DOM helpers
-
     function replaceRangeWithText(range, replacement) {
         const textNode = document.createTextNode(replacement);
         range.deleteContents();
@@ -788,10 +876,10 @@
         lastRange = newRange;
     }
 
-    // Translation bubble (fixed + viewport coords)
     function showTranslationBubble(range, text) {
         const vp = getViewportRect(range);
         const bubble = document.createElement("div");
+        const c = pgColors();
         bubble.className = "pagegenie-translation-bubble";
         bubble.textContent = text;
         Object.assign(bubble.style, {
@@ -800,42 +888,30 @@
             left: Math.max(8, vp.left) + "px",
             maxWidth: "40vw",
             zIndex: "2147483647",
-            background: "rgba(20,20,20,0.96)",
+            background: c.toastBg,
             color: "#fff",
             borderRadius: "8px",
             padding: "8px 10px",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+            border: `1px solid ${c.border}`
         });
         document.documentElement.appendChild(bubble);
         requestAnimationFrame(() => clampToViewport(bubble));
         const close = () => bubble.remove();
         bubble.addEventListener("click", close);
-        setTimeout(() => {
-            document.addEventListener("click", close, { once: true, capture: true });
-        }, 0);
+        setTimeout(() => { document.addEventListener("click", close, { once: true, capture: true }); }, 0);
     }
 
-    // Returns PAGE coordinates (with scroll) — used by toolbar.show (position: absolute)
     function getRangeRect(range) {
         const rects = range.getClientRects();
         const rect = rects[0] || range.getBoundingClientRect();
-        return {
-            top: (rect?.top || 0) + window.scrollY,
-            left: (rect?.left || 0) + window.scrollX
-        };
+        return { top: (rect?.top || 0) + window.scrollY, left: (rect?.left || 0) + window.scrollX };
     }
-
-    // Viewport rect for fixed-position overlays (no scroll offsets)
     function getViewportRect(range) {
         const rects = range.getClientRects();
         const rect = rects[0] || range.getBoundingClientRect();
-        return {
-            top: rect?.top || 0,
-            left: rect?.left || 0
-        };
+        return { top: rect?.top || 0, left: rect?.left || 0 };
     }
-
-    // Keep bubbles on-screen
     function clampToViewport(el) {
         try {
             const vw = window.innerWidth, vh = window.innerHeight;
@@ -844,11 +920,9 @@
             const currentTop = parseFloat(el.style.top || "0");
             const left = Math.min(Math.max(8, currentLeft), Math.max(8, vw - bw - 8));
             const top = Math.min(Math.max(8, currentTop), Math.max(8, vh - bh - 8));
-            el.style.left = left + "px";
-            el.style.top = top + "px";
+            el.style.left = left + "px"; el.style.top = top + "px";
         } catch {}
     }
-
     function findNearestCodeBlock(node) {
         let el = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
         while (el && el !== document.body) {
@@ -857,61 +931,182 @@
         }
         return null;
     }
-
-    function getCodeText(codeEl) {
-        return codeEl.innerText ?? codeEl.textContent ?? "";
-    }
-
-    function setCodeText(codeEl, text) {
-        codeEl.textContent = text;
-    }
-
+    function getCodeText(codeEl) { return codeEl.innerText ?? codeEl.textContent ?? ""; }
+    function setCodeText(codeEl, text) { codeEl.textContent = text; }
     function getSelectionAnchorNode() {
         const sel = document.getSelection();
         if (!sel || sel.rangeCount === 0) return null;
         return sel.getRangeAt(0).startContainer;
     }
-
     function opTitle(op) {
         return ({
             summarize: "Summary",
             explain: "Explanation",
             rewrite: "Rewrite",
             translate: "Translation",
-            proofread: "Proofread"
+            proofread: "Proofread",
+            comment_code: "Code Comments"
         })[op] || op;
     }
 
     function showToast(message) {
         const el = document.createElement("div");
-        el.className = "pagegenie-toast";
+        const c = pgColors();
+        el.className = "pg-toast";
         el.textContent = message;
         Object.assign(el.style, {
             position: "fixed",
             left: "20px",
             bottom: "20px",
-            background: "rgba(30,30,30,0.95)",
+            background: c.toastBg,
             color: "#fff",
             padding: "10px 14px",
             borderRadius: "8px",
             opacity: "0",
-            transform: "translateY(10px)",
+            transform: "translateY(8px)",
             transition: "all .25s ease",
             zIndex: "2147483647",
             pointerEvents: "none",
+            border: `1px solid ${c.border}`,
             fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
         });
         document.documentElement.appendChild(el);
-        setTimeout(() => el.style.opacity = "1", 10);
+        setTimeout(() => { el.style.opacity = "1"; el.style.transform = "translateY(0)"; }, 10);
         setTimeout(() => {
-            el.style.opacity = "0";
-            el.style.transform = "translateY(10px)";
+            el.style.opacity = "0"; el.style.transform = "translateY(8px)";
             setTimeout(() => el.remove(), 300);
         }, 2000);
     }
 
-    function showResultPanel(text) {
+    // Structured result parsing
+    function tryParseStructuredResult(text) {
+        try {
+            const obj = JSON.parse(text);
+            if (obj && Array.isArray(obj.bullets) && Array.isArray(obj.citations)) return obj;
+        } catch {}
+        return null;
+    }
+
+    // Result panel with telemetry footer
+    function renderTelemetryFooter(panel) {
+        if (!__pg_lastTelemetry) return;
+        const { provider, ms, chars } = __pg_lastTelemetry;
+        const c = pgColors();
+        const footer = document.createElement("div");
+        footer.setAttribute("aria-live", "polite");
+        Object.assign(footer.style, {
+            marginTop: "8px",
+            paddingTop: "6px",
+            borderTop: `1px solid ${pgGetThemeMode()==="light" ? "rgba(0,0,0,0.1)" : "rgba(255,255,255,0.1)"}`,
+            color: c.muted,
+            fontSize: "11px",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px"
+        });
+        const badge = document.createElement("span");
+        badge.textContent = provider === "On-device" ? "On-device" : "Cloud";
+        Object.assign(badge.style, {
+            background: provider === "On-device" ? "rgba(34,197,94,.15)" : "rgba(59,130,246,.15)",
+            color: provider === "On-device" ? "#22c55e" : "#3b82f6",
+            border: `1px solid ${provider === "On-device" ? "rgba(34,197,94,.35)" : "rgba(59,130,246,.35)"}`,
+            borderRadius: "999px",
+            padding: "2px 6px",
+            fontSize: "10px"
+        });
+        const text = document.createElement("span");
+        text.textContent = `${ms} ms • ${chars.toLocaleString()} chars`;
+        const hint = document.createElement("span");
+        hint.textContent = "Uses on-device when available; falls back to cloud for larger tasks.";
+        footer.append(badge, text, hint);
+        panel.appendChild(footer);
+    }
+
+    function showStructuredResultPanel({ bullets = [], citations = [] } = {}) {
         const panel = document.createElement("div");
+        const c = pgColors();
+        Object.assign(panel.style, {
+            position: "fixed",
+            right: "20px",
+            bottom: "20px",
+            width: "min(520px, 50vw)",
+            maxHeight: "60vh",
+            overflow: "auto",
+            background: c.panelBg,
+            color: c.text,
+            border: `1px solid ${c.border}`,
+            borderRadius: "8px",
+            padding: "12px",
+            zIndex: "2147483647",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
+        });
+        const sec = (title) => {
+            const h = document.createElement("div");
+            h.textContent = title;
+            h.style.fontWeight = "700";
+            h.style.margin = "6px 0";
+            return h;
+        };
+
+        if (bullets.length) {
+            panel.append(sec("Summary"));
+            const ul = document.createElement("ul"); ul.style.marginTop = "4px";
+            bullets.forEach(b => { const li = document.createElement("li"); li.textContent = String(b || ""); ul.appendChild(li); });
+            panel.append(ul);
+        }
+
+        if (citations.length) {
+            panel.append(sec("References"));
+            const ol = document.createElement("ol"); ol.style.marginTop = "4px";
+            citations.forEach(cit => {
+                const li = document.createElement("li");
+                if (cit.url) {
+                    const a = document.createElement("a");
+                    a.href = cit.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+                    a.textContent = cit.title || cit.url || "Source";
+                    a.style.color = "#9fd3ff"; a.style.textDecoration = "none";
+                    a.addEventListener("mouseover", () => a.style.textDecoration = "underline");
+                    a.addEventListener("mouseout", () => a.style.textDecoration = "none");
+                    li.appendChild(a);
+                } else { li.textContent = cit.title || "Source"; }
+                if (cit.note) {
+                    const s = document.createElement("span");
+                    s.textContent = " — " + cit.note;
+                    s.style.color = c.muted; s.style.fontSize = "12px";
+                    li.appendChild(s);
+                }
+                ol.appendChild(li);
+            });
+            panel.append(ol);
+        }
+
+        // Telemetry microcopy
+        renderTelemetryFooter(panel);
+
+        const actions = document.createElement("div");
+        actions.style.textAlign = "right";
+        actions.style.marginTop = "8px";
+        const close = document.createElement("button");
+        close.textContent = "Close";
+        Object.assign(close.style, {
+            background: "#222",
+            color: "#fff",
+            border: `1px solid ${c.border}`,
+            padding: "4px 8px",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontSize: "12px"
+        });
+        close.addEventListener("click", () => panel.remove());
+        actions.appendChild(close);
+        panel.appendChild(actions);
+
+        document.documentElement.appendChild(panel);
+    }
+
+    const __orig_showResultPanel = function(text) {
+        const panel = document.createElement("div");
+        const c = pgColors();
         panel.className = "pagegenie-result-panel";
         Object.assign(panel.style, {
             position: "fixed",
@@ -920,9 +1115,9 @@
             width: "min(520px, 50vw)",
             maxHeight: "50vh",
             overflow: "auto",
-            background: "#121212",
-            color: "#eee",
-            border: "1px solid rgba(255,255,255,0.12)",
+            background: c.panelBg,
+            color: c.text,
+            border: `1px solid ${c.border}`,
             borderRadius: "8px",
             padding: "12px",
             zIndex: "2147483647"
@@ -935,6 +1130,9 @@
             margin: "0 0 8px 0"
         });
         pre.textContent = text;
+
+        renderTelemetryFooter(panel);
+
         const copyBtn = document.createElement("button");
         copyBtn.textContent = "Copy";
         copyBtn.addEventListener("click", async () => {
@@ -947,12 +1145,28 @@
         const close = document.createElement("button");
         close.textContent = "Close";
         close.addEventListener("click", () => panel.remove());
+        [copyBtn, close].forEach(b => {
+            Object.assign(b.style, {
+                background: "#222",
+                color: "#fff",
+                border: `1px solid ${c.border}`,
+                padding: "4px 8px",
+                borderRadius: "6px",
+                cursor: "pointer",
+                fontSize: "12px",
+                marginRight: "6px"
+            });
+        });
         panel.append(pre, copyBtn, close);
         document.documentElement.appendChild(panel);
+    };
+    function showResultPanel(text) {
+        const s = tryParseStructuredResult(text);
+        if (s) return showStructuredResultPanel(s);
+        return __orig_showResultPanel(text);
     }
 
-    // Categories + Suggestions UI
-
+    // Categories + Suggestions UI and helpers (unchanged from previous answer)
     function safeParseJson(s) {
         if (!s) return null;
         if (typeof s === "object") return s;
@@ -972,7 +1186,6 @@
         }
         return null;
     }
-
     function normalizeSuggestionsShape(raw) {
         if (!raw) return [];
         if (Array.isArray(raw)) return raw;
@@ -982,10 +1195,8 @@
         if (typeof raw === "object" && (raw.suggestedUrl || raw.url)) return [raw];
         return [];
     }
-
     function showCategoriesBubbleWithFallback(categories) {
         if (!categories) { showMinimalBubble("Note saved"); return; }
-
         const range = (() => {
             const sel = document.getSelection();
             if (sel && sel.rangeCount) return sel.getRangeAt(0).cloneRange();
@@ -999,6 +1210,7 @@
                 : { top: 20, left: 20 });
 
         const bubble = document.createElement("div");
+        const c = pgColors();
         bubble.className = "pagegenie-categories-bubble";
         const topic = categories?.topic || "Note saved";
         const tags = Array.isArray(categories?.tags) ? categories.tags : [];
@@ -1006,21 +1218,21 @@
         const summary = categories?.summary || "";
 
         bubble.innerHTML = `
-    <div class="pgc-title">📘 ${escapeHtml(topic)}</div>
-    ${ tags.length ? `<div class="pgc-row"><span class="pgc-label">Tags:</span> ${tags.map(t => `<span class="pgc-chip">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
-    ${ related.length ? `<div class="pgc-row"><span class="pgc-label">Related:</span> ${related.map(t => `<span class="pgc-chip subtle">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
-    ${ summary ? `<div class="pgc-summary">${escapeHtml(summary)}</div>` : "" }
-    <div class="pgc-actions"><button class="pgc-close">Close</button></div>
-  `;
+      <div class="pgc-title">📘 ${escapeHtml(topic)}</div>
+      ${ tags.length ? `<div class="pgc-row"><span class="pgc-label">Tags:</span> ${tags.map(t => `<span class="pgc-chip">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
+      ${ related.length ? `<div class="pgc-row"><span class="pgc-label">Related:</span> ${related.map(t => `<span class="pgc-chip subtle">${escapeHtml(t)}</span>`).join(" ")}</div>` : "" }
+      ${ summary ? `<div class="pgc-summary">${escapeHtml(summary)}</div>` : "" }
+      <div class="pgc-actions"><button class="pgc-close">Close</button></div>
+    `;
 
         Object.assign(bubble.style, {
             position: "fixed",
             top: Math.max(8, vp.top) + "px",
             left: Math.max(8, vp.left) + "px",
             zIndex: "2147483647",
-            background: "rgba(20,20,20,0.96)",
+            background: c.toastBg,
             color: "#fff",
-            border: "1px solid rgba(255,255,255,0.12)",
+            border: `1px solid ${c.border}`,
             borderRadius: "10px",
             padding: "10px 12px",
             maxWidth: "min(420px, 60vw)",
@@ -1041,13 +1253,13 @@
             document.addEventListener("click", hide, true);
         }, 0);
     }
-
     function showMinimalBubble(text) {
         const pos = lastAnchorPosViewport
             ? { top: Math.max(8, lastAnchorPosViewport.top - 10), left: Math.max(8, lastAnchorPosViewport.left) }
             : { top: window.innerHeight ? 20 : (window.scrollY + 20), left: window.innerWidth ? 20 : (window.scrollX + 20) };
 
         const bubble = document.createElement("div");
+        const c = pgColors();
         bubble.className = "pagegenie-categories-bubble";
         bubble.textContent = text || "Note saved";
         Object.assign(bubble.style, {
@@ -1055,9 +1267,9 @@
             top: pos.top + "px",
             left: pos.left + "px",
             zIndex: "2147483647",
-            background: "rgba(20,20,20,0.96)",
+            background: c.toastBg,
             color: "#fff",
-            border: "1px solid rgba(255,255,255,0.12)",
+            border: `1px solid ${c.border}`,
             borderRadius: "10px",
             padding: "10px 12px",
             boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
@@ -1066,11 +1278,10 @@
         requestAnimationFrame(() => clampToViewport(bubble));
         setTimeout(() => bubble.remove(), 2500);
     }
-
     function showSuggestionsPanel(suggestions) {
         if (!Array.isArray(suggestions) || !suggestions.length) return;
-
         const panel = document.createElement("div");
+        const c = pgColors();
         panel.className = "pagegenie-suggestions-panel";
 
         Object.assign(panel.style, {
@@ -1080,9 +1291,9 @@
             width: "min(420px, 50vw)",
             maxHeight: "60vh",
             overflow: "auto",
-            background: "#111",
-            color: "#eee",
-            border: "1px solid rgba(255,255,255,0.12)",
+            background: c.panelBg,
+            color: c.text,
+            border: `1px solid ${c.border}`,
             borderRadius: "10px",
             padding: "12px",
             zIndex: "2147483647",
@@ -1101,29 +1312,23 @@
             const reason = s.reason || "";
             const item = document.createElement("div");
             item.style.padding = "8px 0";
-            item.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
+            item.style.borderBottom = `1px solid ${pgGetThemeMode()==="light" ? "rgba(0,0,0,0.08)" : "rgba(255,255,255,0.08)"}`;
 
             const a = document.createElement("a");
-            a.href = href;
-            a.target = "_blank";
-            a.rel = "noopener noreferrer";
+            a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
             a.textContent = title;
-            a.style.color = "#9fd3ff";
-            a.style.textDecoration = "none";
+            a.style.color = "#9fd3ff"; a.style.textDecoration = "none";
             a.addEventListener("mouseover", () => a.style.textDecoration = "underline");
             a.addEventListener("mouseout", () => a.style.textDecoration = "none");
-
             item.appendChild(a);
 
             if (reason) {
                 const r = document.createElement("div");
                 r.textContent = reason;
-                r.style.color = "#bbb";
-                r.style.fontSize = "12px";
-                r.style.marginTop = "4px";
+                r.style.color = pgColors().muted;
+                r.style.fontSize = "12px"; r.style.marginTop = "4px";
                 item.appendChild(r);
             }
-
             panel.appendChild(item);
         });
 
@@ -1135,7 +1340,7 @@
         Object.assign(close.style, {
             background: "#222",
             color: "#fff",
-            border: "1px solid rgba(255,255,255,0.18)",
+            border: `1px solid ${pgColors().border}`,
             padding: "4px 8px",
             borderRadius: "6px",
             cursor: "pointer",
@@ -1144,229 +1349,111 @@
         close.addEventListener("click", () => panel.remove());
         actions.appendChild(close);
         panel.appendChild(actions);
-
         document.documentElement.appendChild(panel);
     }
 
-    // Render a structured panel with headings
-    function showComparePanel({ keyClaim, agreement, drift }) {
-        const panel = document.createElement("div");
-        panel.className = "pagegenie-result-panel";
-        Object.assign(panel.style, {
-            position: "fixed",
-            right: "20px",
-            bottom: "20px",
-            width: "min(520px, 50vw)",
-            maxHeight: "60vh",
-            overflow: "auto",
-            background: "#121212",
-            color: "#eee",
-            border: "1px solid rgba(255,255,255,0.12)",
-            borderRadius: "8px",
-            padding: "12px",
-            zIndex: "2147483647"
-        });
+    // Theme utilities + toolbar/FAB creators + icons
 
-        const section = (title, text) => {
-            const wrap = document.createElement("div");
-            const h = document.createElement("div");
-            const p = document.createElement("div");
-            h.textContent = title;
-            h.style.fontWeight = "700";
-            h.style.margin = "6px 0 4px";
-            p.textContent = text || "—";
-            p.style.whiteSpace = "pre-wrap";
-            wrap.appendChild(h);
-            wrap.appendChild(p);
-            return wrap;
+    function pgGetThemeMode() {
+        if (settings?.theme === "light") return "light";
+        if (settings?.theme === "dark") return "dark";
+        const prefersDark = _pg_mql ? _pg_mql.matches : true;
+        return prefersDark ? "dark" : "light";
+    }
+    function pgColors() {
+        const mode = pgGetThemeMode();
+        if (mode === "light") {
+            return {
+                text: "#0b1220",
+                muted: "#4d5b78",
+                bg: "rgba(255,255,255,0.98)",
+                surface: "#f4f6fa",
+                border: "rgba(0,0,0,0.14)",
+                border2: "rgba(0,0,0,0.08)",
+                focus: "#1d4ed8",
+                accent: "#2563eb",
+                panelBg: "#ffffff",
+                toolbarBg: "rgba(20,21,24,0.97)",
+                toastBg: "rgba(30,30,30,0.95)",
+                btn: "#1f2937",
+                btnHover: "#243041"
+            };
+        }
+        return {
+            text: "#e8eaf0",
+            muted: "#9aa3b2",
+            bg: "rgba(15,17,21,0.98)",
+            surface: "#171a21",
+            border: "rgba(255,255,255,0.14)",
+            border2: "rgba(255,255,255,0.10)",
+            focus: "#3b82f6",
+            accent: "#5aa9ff",
+            panelBg: "#121212",
+            toolbarBg: "rgba(26,26,26,0.96)",
+            toastBg: "rgba(20,20,20,0.96)",
+            btn: "#2a2f3a",
+            btnHover: "#343b48"
         };
-
-        const close = document.createElement("button");
-        close.textContent = "Close";
-        Object.assign(close.style, {
-            marginTop: "8px",
-            background: "#222",
-            color: "#fff",
-            border: "1px solid rgba(255,255,255,0.18)",
-            padding: "4px 8px",
-            borderRadius: "6px",
-            cursor: "pointer",
-            fontSize: "12px"
-        });
-        close.addEventListener("click", () => panel.remove());
-
-        panel.append(
-            section("Key Claim", keyClaim),
-            section("Agreement", agreement),
-            section("Concept Drift / Difference", drift),
-            close
-        );
-        document.documentElement.appendChild(panel);
+    }
+    function pgInjectStyles() {
+        if (document.getElementById("pagegenie-a11y-anim")) return;
+        const style = document.createElement("style");
+        style.id = "pagegenie-a11y-anim";
+        style.textContent = `
+      .pg-focus:focus-visible { outline: 2px solid var(--pg-focus,#3b82f6); outline-offset: 2px; }
+      .pg-anim-pop { transform: scale(0.98); opacity: 0; transition: transform .12s ease, opacity .12s ease; }
+      .pg-anim-pop.pg-open { transform: scale(1); opacity: 1; }
+      .pg-toast { transition: opacity .25s ease, transform .25s ease; }
+      .pg-toast-show { opacity: 1 !important; transform: translateY(0) !important; }
+      .pg-anim-fade { opacity: 0; transform: translateY(-4px); transition: opacity .12s ease, transform .12s ease; }
+      .pg-anim-fade.pg-open { opacity: 1; transform: translateY(0); }
+    `;
+        document.documentElement.appendChild(style);
+    }
+    function pgApplyTheme() {
+        const c = pgColors();
+        const root = document.getElementById("pagegenie-fab");
+        if (root) {
+            root.style.setProperty("--pg-text", c.text);
+            root.style.setProperty("--pg-muted", c.muted);
+            root.style.setProperty("--pg-bg", c.bg);
+            root.style.setProperty("--pg-surface", c.surface);
+            root.style.setProperty("--pg-border", c.border);
+            root.style.setProperty("--pg-focus", c.focus);
+            root.style.setProperty("--pg-btn", c.btn);
+            root.style.setProperty("--pg-btnh", c.btnHover);
+        }
+    }
+    function iconSvg(name, size = 16) {
+        const s = String(size);
+        const props = `width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"`;
+        switch (name) {
+            case "genie": return `<svg ${props}><path d="M12 3c-4 0-7 3-7 7 0 1 .2 2 .7 3l-1.4 4.2a1 1 0 0 0 1.27 1.27L9.8 17.3A7 7 0 1 0 12 3z"/><circle cx="12" cy="10" r="2"/></svg>`;
+            case "summarize": return `<svg ${props}><path d="M4 6h16M4 12h8M4 18h12"/></svg>`;
+            case "explain": return `<svg ${props}><path d="M21 15v4a2 2 0 0 1-2 2H7l-4 3V5a2 2 0 0 1 2-2h10"/><path d="M17 3h4v4"/></svg>`;
+            case "rewrite": return `<svg ${props}><path d="M3 17l6 6M3 17l12-12a2 2 0 0 1 3 3L6 20z"/></svg>`;
+            case "translate": return `<svg ${props}><path d="M7 7h10M5 5l7 14M17 5L10 19M14 7l5 5"/></svg>`;
+            case "document": return `<svg ${props}><path d="M14 2H6a2 2 0 0 0-2 2v16l4-4h10a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>`;
+            case "save": return `<svg ${props}><path d="M5 21V3h10l4 4v14z"/><path d="M9 21v-8h6v8"/><path d="M9 3v4h6"/></svg>`;
+            case "compare": return `<svg ${props}><path d="M10 4H6a2 2 0 0 0-2 2v12"/><path d="M14 20h4a2 2 0 0 0 2-2V6"/><path d="M8 12h8"/></svg>`;
+            case "quiz": return `<svg ${props}><path d="M9 7a3 3 0 1 1 6 0c0 2-3 2-3 4"/><path d="M12 17h.01"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>`;
+            case "proof": return `<svg ${props}><path d="M20 6L9 17l-5-5"/></svg>`;
+            case "comment": return `<svg ${props}><path d="M21 15v4a2 2 0 0 1-2 2H7l-4 3V5a2 2 0 0 1 2-2h10"/><path d="M7 8h6M7 12h8"/></svg>`;
+            default: return `<svg ${props}><circle cx="12" cy="12" r="10"/></svg>`;
+        }
     }
 
-    function escapeHtml(str) {
-        return String(str).replace(/[&<>"']/g, s => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[s]));
-    }
-
-    function escapeAttr(str) {
-        return escapeHtml(str).replace(/"/g, "&quot;");
-    }
-
-    // UI toolbar
-    function createToolbar() {
-        const root = document.createElement("div");
-        root.className = "pagegenie-toolbar";
-        root.style.display = "none";
-
-        Object.assign(root.style, {
-            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
-            background: "rgba(26,26,26,0.95)",
-            color: "#fff",
-            padding: "6px 8px",
-            borderRadius: "8px",
-            boxShadow: "0 6px 18px rgba(0,0,0,0.25)",
-            display: "flex",
-            gap: "6px",
-            alignItems: "center",
-            zIndex: "2147483647",
-            userSelect: "none",
-            position: "absolute"
-        });
-
-        const actions = [
-            { id: "summarize", label: "✨ Summary" },
-            { id: "explain", label: "💬 Explain" },
-            { id: "rewrite", label: "🪄 Rewrite" },
-            { id: "translate", label: "🌍 Translate" },
-            { id: "sep", label: "|" },
-            { id: "save", label: "📘 Save" },
-            { id: "compare_concept", label: "🔗 Analyze Concept Drift" },
-            { id: "quiz_selection", label: "🧠 Quiz Me" },
-            { id: "sep", label: "|" },
-            { id: "quick_proof", label: "⚡ Replace with Proofread" },
-            { id: "quick_comment", label: "⚡ Insert Code Comments" }
-        ];
-
-        const handlers = {};
-        const btns = actions.map(a => {
-            if (a.id === "sep") {
-                const sep = document.createElement("span");
-                sep.className = "pagegenie-sep";
-                sep.textContent = a.label;
-                sep.style.color = "rgba(255,255,255,0.45)";
-                sep.style.padding = "0 4px";
-                return sep;
-            }
-            const b = document.createElement("button");
-            b.className = "pagegenie-btn";
-            b.textContent = a.label;
-            Object.assign(b.style, {
-                background: "#2f2f2f",
-                color: "#fff",
-                border: "1px solid rgba(255,255,255,0.12)",
-                padding: "4px 8px",
-                borderRadius: "6px",
-                fontSize: "12px",
-                cursor: "pointer"
-            });
-            b.addEventListener("mouseover", () => (b.style.background = "#3a3a3a"));
-            b.addEventListener("mouseout", () => (b.style.background = "#2f2f2f"));
-            b.addEventListener("click", (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                handlers[a.id]?.();
-            });
-            return b;
-        });
-        btns.forEach(b => root.appendChild(b));
-        document.documentElement.appendChild(root);
-
-        function on(id, fn) { handlers[id] = fn; }
-        function show(pos) {
-            root.style.display = "flex";
-            root.style.top = (pos.top - 40) + "px";
-            root.style.left = pos.left + "px";
-            lastAnchorPos = { top: pos.top, left: pos.left };
-        }
-        function hide() { root.style.display = "none"; }
-
-        return { on, show, hide };
-    }
-
-    // Persistent loading toast helper
-    function createLoadingToast(initialMessage = "Loading…") {
-        const el = document.createElement("div");
-        el.className = "pagegenie-loading-toast";
-        const icon = document.createElement("span");
-        icon.textContent = "⏳";
-        icon.style.marginRight = "8px";
-        const text = document.createElement("span");
-        text.textContent = initialMessage;
-
-        Object.assign(el.style, {
-            position: "fixed",
-            left: "20px",
-            bottom: "20px",
-            background: "rgba(20,20,20,0.96)",
-            color: "#fff",
-            padding: "10px 12px",
-            borderRadius: "10px",
-            border: "1px solid rgba(255,255,255,0.12)",
-            zIndex: "2147483647",
-            display: "flex",
-            alignItems: "center",
-            maxWidth: "50vw",
-            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
-        });
-
-        el.append(icon, text);
-        document.documentElement.appendChild(el);
-
-        let dots = 0;
-        const interval = setInterval(() => {
-            dots = (dots + 1) % 4;
-            const base = text.dataset.base || text.textContent.replace(/\.*$/, "");
-            text.dataset.base = base;
-            text.textContent = base + ".".repeat(dots);
-        }, 400);
-
-        function set(msg) {
-            delete text.dataset.base;
-            text.textContent = msg;
-        }
-        function success(msg = "Done") {
-            clearInterval(interval);
-            icon.textContent = "✅";
-            set(msg);
-            el.style.background = "rgba(8, 80, 30, 0.96)";
-            el.style.borderColor = "rgba(255,255,255,0.18)";
-            setTimeout(close, 900);
-        }
-        function error(msg = "Error") {
-            clearInterval(interval);
-            icon.textContent = "⚠️";
-            set(msg);
-            el.style.background = "rgba(120, 20, 20, 0.96)";
-            el.style.borderColor = "rgba(255,255,255,0.18)";
-            setTimeout(close, 1400);
-        }
-        function close() {
-            try { el.remove(); } catch {}
-        }
-        return { set, success, error, close };
-    }
-
-    // Floating Action Button (FAB) — always-visible toggleable menu (controlled by showFloatingButton)
+    // FAB
     let __pg_fab_root = null;
     let __pg_fab_menu_open = false;
     let __pg_fab_observer = null;
 
     function ensureFloatingButton() {
-        // Only in top frame to avoid duplicates
         try { if (window.top !== window.self) return; } catch {}
-
         if (__pg_fab_root && document.documentElement.contains(__pg_fab_root)) return;
+
+        pgInjectStyles();
+        const c = pgColors();
 
         const root = document.createElement("div");
         root.id = "pagegenie-fab";
@@ -1379,10 +1466,10 @@
             flexDirection: "column",
             alignItems: "flex-end",
             gap: "8px",
-            pointerEvents: "none"
+            pointerEvents: "none",
+            "--pg-focus": c.focus
         });
 
-        // Vertical menu container
         const menu = document.createElement("div");
         menu.id = "pagegenie-fab-menu";
         Object.assign(menu.style, {
@@ -1392,96 +1479,116 @@
             paddingBottom: "4px",
             pointerEvents: "auto"
         });
+        menu.setAttribute("role", "menu");
+        menu.setAttribute("aria-label", "PageGenie actions");
 
         const btn = document.createElement("button");
         btn.id = "pagegenie-fab-btn";
         btn.title = "PageGenie";
-        btn.setAttribute("aria-label", "PageGenie menu");
+        btn.setAttribute("aria-label", "Open PageGenie menu");
+        btn.setAttribute("aria-expanded", "false");
+        btn.className = "pg-focus";
         Object.assign(btn.style, {
             pointerEvents: "auto",
             width: "52px",
             height: "52px",
             borderRadius: "50%",
-            border: "1px solid rgba(255,255,255,0.18)",
-            background: "linear-gradient(135deg, #1b1f2a 0%, #0f141c 100%)",
-            color: "#fff",
+            border: `1px solid ${c.border2 || c.border}`,
+            background: `linear-gradient(135deg, ${c.surface} 0%, ${pgGetThemeMode()==='light' ? '#e9eef7' : '#0f141c'} 100%)`,
+            color: c.text,
             boxShadow: "0 10px 24px rgba(0,0,0,0.35)",
             cursor: "pointer",
-            fontSize: "22px"
+            fontSize: "0"
         });
-        btn.textContent = "🧞";
+        btn.innerHTML = iconSvg("genie", 26);
 
-        function mbtn(label, onClick) {
+        function mbtn(label, icon, onClick) {
             const b = document.createElement("button");
-            b.className = "pagegenie-fab-item";
-            b.textContent = label;
+            b.className = "pagegenie-fab-item pg-focus pg-anim-pop";
+            b.setAttribute("role", "menuitem");
+            b.setAttribute("tabindex", "-1");
+            b.setAttribute("aria-label", label);
             Object.assign(b.style, {
-                background: "rgba(20,20,20,0.98)",
-                color: "#fff",
-                border: "1px solid rgba(255,255,255,0.14)",
+                background: c.btn,
+                color: c.text,
+                border: `1px solid ${c.border}`,
                 padding: "8px 10px",
                 borderRadius: "8px",
                 cursor: "pointer",
                 fontSize: "13px",
-                minWidth: "200px",
+                minWidth: "220px",
                 textAlign: "left",
-                boxShadow: "0 8px 20px rgba(0,0,0,0.3)"
+                boxShadow: "0 8px 20px rgba(0,0,0,0.3)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px"
             });
-            b.addEventListener("mouseenter", () => (b.style.background = "rgba(28,28,28,0.98)"));
-            b.addEventListener("mouseleave", () => (b.style.background = "rgba(20,20,20,0.98)"));
+            b.addEventListener("mouseenter", () => (b.style.background = c.btnHover));
+            b.addEventListener("mouseleave", () => (b.style.background = c.btn));
             b.addEventListener("click", (e) => {
-                e.preventDefault();
-                e.stopPropagation();
+                e.preventDefault(); e.stopPropagation();
                 try { onClick(); } catch {}
                 toggleMenu(false);
+                btn.focus();
             });
+            b.addEventListener("keydown", (e) => {
+                if (e.key === "Enter" || e.key === " ") { e.preventDefault(); b.click(); }
+                if (e.key === "Escape") { e.preventDefault(); toggleMenu(false); btn.focus(); }
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    const items = [...menu.querySelectorAll('[role="menuitem"]')];
+                    const idx = items.indexOf(document.activeElement);
+                    const next = e.key === "ArrowDown" ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length;
+                    items[next]?.focus();
+                }
+            });
+            b.innerHTML = iconSvg(icon, 16) + `<span>${label}</span>`;
             return b;
         }
 
-        // Build menu items (reusing the same handlers)
-        menu.append(
-            mbtn("✨ Summarize", () => runSimpleOp("summarize")),
-            mbtn("💬 Explain", () => runSimpleOp("explain")),
-            mbtn("🪄 Rewrite", () => runSimpleOp("rewrite")),
-            mbtn("🌍 Translate", () => runTranslationOverlay()),
-            mbtn("📄 Process Full Document", () => runFullDocSummarize()),
-            mbtn("📘 Save Note", () => saveNote()),
-            mbtn("🔗 Analyze Concept Drift", () => compareConceptDrift()),
-            mbtn("🧠 Quiz Me", () => quizSelectedText()
-            )
-        )
-
+        const items = [
+            ["✨ Summarize", "summarize", () => runSimpleOp("summarize")],
+            ["💬 Explain", "explain", () => runSimpleOp("explain")],
+            ["🪄 Rewrite", "rewrite", () => runSimpleOp("rewrite")],
+            ["🌍 Translate", "translate", () => runTranslationOverlay()],
+            ["📄 Process Full Document", "document", () => runFullDocSummarize()],
+            ["📘 Save Note", "save", () => saveNote()],
+            ["🔗 Analyze Concept Drift", "compare", () => compareConceptDrift()],
+            ["🧠 Quiz Me", "quiz", () => quizSelectedText()],
+            ["🔎 Find sources", "compare", () => runFindSources()]
+        ];
+        items.forEach(([label, icon, fn]) => menu.append(mbtn(label, icon, fn)));
 
         function toggleMenu(open) {
-            __pg_fab_menu_open = open ?? !__pg_fab_menu_open;
-            menu.style.display = __pg_fab_menu_open ? "flex" : "none";
+            const willOpen = open ?? menu.style.display === "none";
+            if (willOpen) {
+                menu.style.display = "flex";
+                btn.setAttribute("aria-expanded", "true");
+                requestAnimationFrame(() => menu.querySelectorAll(".pg-anim-pop").forEach(el => el.classList.add("pg-open")));
+                const first = menu.querySelector('[role="menuitem"]');
+                first?.focus();
+            } else {
+                menu.querySelectorAll(".pg-anim-pop").forEach(el => el.classList.remove("pg-open"));
+                setTimeout(() => { menu.style.display = "none"; }, 100);
+                btn.setAttribute("aria-expanded", "false");
+            }
         }
-        btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleMenu();
-        });
+        btn.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); toggleMenu(); });
+        btn.addEventListener("keydown", (e) => { if (e.key === "ArrowDown") { e.preventDefault(); toggleMenu(true); } });
 
-        function onDocClick(e) {
-            if (!__pg_fab_menu_open) return;
-            if (!root.contains(e.target)) toggleMenu(false);
-        }
-        function onKeyDown(e) {
-            if (__pg_fab_menu_open && e.key === "Escape") toggleMenu(false);
-        }
+        function onDocClick(e) { if (menu.style.display === "flex" && !root.contains(e.target)) toggleMenu(false); }
+        function onKeyDown(e) { if (menu.style.display === "flex" && e.key === "Escape") toggleMenu(false); }
         document.addEventListener("click", onDocClick, true);
         document.addEventListener("keydown", onKeyDown, true);
 
         root.append(menu, btn);
         document.documentElement.appendChild(root);
-
         __pg_fab_root = root;
         __pg_fab_root.__pg_cleanup = () => {
             document.removeEventListener("click", onDocClick, true);
             document.removeEventListener("keydown", onKeyDown, true);
         };
 
-        // Keep-alive — if sites rewrite DOM, recreate FAB while enabled
         try {
             if (__pg_fab_observer) __pg_fab_observer.disconnect();
             __pg_fab_observer = new MutationObserver(() => {
@@ -1493,99 +1600,219 @@
             });
             __pg_fab_observer.observe(document.documentElement, { childList: true });
         } catch {}
+
+        pgApplyTheme();
     }
 
     function removeFloatingButton() {
-        if (__pg_fab_observer) {
-            try { __pg_fab_observer.disconnect(); } catch {}
-            __pg_fab_observer = null;
-        }
+        if (__pg_fab_observer) { try { __pg_fab_observer.disconnect(); } catch {} __pg_fab_observer = null; }
         if (__pg_fab_root) {
             try { __pg_fab_root.__pg_cleanup?.(); } catch {}
             try { __pg_fab_root.remove(); } catch {}
-            __pg_fab_root = null;
-            __pg_fab_menu_open = false;
+            __pg_fab_root = null; __pg_fab_menu_open = false;
         }
     }
 
-    // Helper: confirm before full-page processing when there is no selection
-    async function ensureFullPageConsent(op, text, sourceHint = "whole page") {
-        if (!settings.showFullPageConfirm) return true;
-        const count = (text || "").length;
-        return await confirmFullPageModal(op, count, sourceHint);
-    }
+    // Selection toolbar with tooltips + shortcuts in titles
+    function createToolbar() {
+        pgInjectStyles();
+        const c = pgColors();
 
-    // NEW: Minimal confirmation modal (returns Promise<boolean>)
-    function confirmFullPageModal(op, charCount, sourceHint) {
-        return new Promise((resolve) => {
-            const root = document.createElement("div");
-            Object.assign(root.style, {
-                position: "fixed", inset: "0", background: "rgba(0,0,0,0.45)", zIndex: "2147483647",
-                display: "flex", alignItems: "center", justifyContent: "center"
-            });
+        const root = document.createElement("div");
+        root.className = "pagegenie-toolbar pg-anim-fade";
+        root.setAttribute("role", "toolbar");
+        root.setAttribute("aria-label", "PageGenie selection actions");
+        root.style.display = "none";
 
-            const card = document.createElement("div");
-            Object.assign(card.style, {
-                background: "#0f1115", color: "#e8eaf0", border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: "10px", width: "min(520px, 90vw)", padding: "16px 18px", boxShadow: "0 12px 36px rgba(0,0,0,0.4)",
-                fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
-            });
-
-            const title = document.createElement("div");
-            title.textContent = "Process full page?";
-            Object.assign(title.style, { fontWeight: "800", marginBottom: "6px" });
-
-            const msg = document.createElement("div");
-            msg.innerHTML = `You’re about to run <b>${escapeHtml(opTitle(op))}</b> on the ${escapeHtml(sourceHint)}.<br/>Estimated size: <b>${charCount.toLocaleString()}</b> characters.`;
-            Object.assign(msg.style, { color: "#cbd5e1", fontSize: "13px", marginBottom: "10px" });
-
-            const dontAskWrap = document.createElement("label");
-            const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "pg-dontask";
-            const txt = document.createElement("span"); txt.textContent = " Don’t ask again for full-page actions";
-            dontAskWrap.append(cb, txt);
-            Object.assign(dontAskWrap.style, { display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "#9aa3b2" });
-
-            const row = document.createElement("div");
-            Object.assign(row.style, { display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
-
-            const cancel = document.createElement("button");
-            cancel.textContent = "Cancel";
-            styleBtn(cancel, "ghost");
-
-            const proceed = document.createElement("button");
-            proceed.textContent = "Process";
-            styleBtn(proceed, "primary");
-
-            cancel.onclick = () => { cleanup(false); };
-            proceed.onclick = async () => {
-                if (cb.checked) {
-                    try { await chrome.storage.sync.set({ showFullPageConfirm: false }); settings.showFullPageConfirm = false; } catch {}
-                }
-                cleanup(true);
-            };
-
-            row.append(cancel, proceed);
-            card.append(title, msg, dontAskWrap, row);
-            root.append(card);
-            document.documentElement.append(root);
-
-            function cleanup(ok) {
-                try { root.remove(); } catch {}
-                resolve(!!ok);
-            }
-            function styleBtn(b, kind) {
-                Object.assign(b.style, {
-                    background: kind === "primary" ? "#155e75" : "#1b1b1b",
-                    color: "#fff", border: "1px solid rgba(255,255,255,0.18)", padding: "6px 10px",
-                    borderRadius: "8px", cursor: "pointer", fontSize: "13px"
-                });
-                b.onmouseenter = () => b.style.background = (kind === "primary" ? "#1b6b85" : "#242424");
-                b.onmouseleave = () => b.style.background = (kind === "primary" ? "#155e75" : "#1b1b1b");
-            }
+        Object.assign(root.style, {
+            position: "absolute",
+            zIndex: "2147483647",
+            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+            background: c.toolbarBg,
+            color: c.text,
+            padding: "6px 8px",
+            borderRadius: "10px",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.25)",
+            display: "flex",
+            gap: "6px",
+            alignItems: "center",
+            border: `1px solid ${c.border}`,
+            "--pg-focus": c.focus
         });
+
+        function tbtn(id, label, iconName, tooltip) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = "pagegenie-btn pg-focus";
+            b.setAttribute("data-id", id);
+            b.setAttribute("aria-label", label);
+            b.title = tooltip || label;
+            b.innerHTML = `${iconSvg(iconName, 16)} <span style="margin-left:6px">${label}</span>`;
+            Object.assign(b.style, {
+                background: c.btn,
+                color: c.text,
+                border: `1px solid ${c.border}`,
+                padding: "4px 8px",
+                borderRadius: "6px",
+                fontSize: "12px",
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px"
+            });
+            b.addEventListener("mouseenter", () => (b.style.background = c.btnHover));
+            b.addEventListener("mouseleave", () => (b.style.background = c.btn));
+            return b;
+        }
+
+        const shortcuts = {
+            summarize: "Alt+Shift+S",
+            explain: "Alt+Shift+E",
+            rewrite: "Alt+Shift+R",
+            translate: "Alt+Shift+T",
+            quick_proof: "Alt+Shift+P"
+        };
+
+        const actions = [
+            { id: "summarize", label: "Summary", icon: "summarize", tip: `Summarize selection (or page) • ${shortcuts.summarize}` },
+            { id: "explain", label: "Explain", icon: "explain", tip: `Explain selection (or page) • ${shortcuts.explain}` },
+            { id: "rewrite", label: "Rewrite", icon: "rewrite", tip: `Rewrite for clarity • ${shortcuts.rewrite}` },
+            { id: "translate", label: "Translate", icon: "translate", tip: `Translate selection (bubble) or page (panel) • ${shortcuts.translate}` },
+            { id: "save", label: "Save", icon: "save", tip: "Save note; shows categories and curated suggestions" },
+            { id: "compare_concept", label: "Analyze", icon: "compare", tip: "Analyze selected idea against your notes (concept drift)" },
+            { id: "quiz_selection", label: "Quiz Me", icon: "quiz", tip: "Generate a quick quiz from selection (cloud)" },
+            { id: "quick_proof", label: "Proofread", icon: "proof", tip: `Replace selection with corrected text • ${shortcuts.quick_proof}` },
+            { id: "quick_comment", label: "Code Comments", icon: "comment", tip: "Insert explainer comments into nearest code block" },
+            { id: "find_sources", label: "Find sources", icon: "compare", tip: "Search the web for related sources (clearly labeled)" }
+        ];
+
+        const handlers = {};
+        const btns = actions.map(a => {
+            const b = tbtn(a.id, a.label, a.icon, a.tip);
+            b.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); handlers[a.id]?.(); });
+            root.appendChild(b);
+            return b;
+        });
+
+        root.addEventListener("keydown", (e) => {
+            const items = btns;
+            const current = document.activeElement;
+            const idx = items.indexOf(current);
+            if (e.key === "ArrowRight") { e.preventDefault(); items[(idx + 1) % items.length]?.focus(); }
+            else if (e.key === "ArrowLeft") { e.preventDefault(); items[(idx - 1 + items.length) % items.length]?.focus(); }
+            else if (e.key === "Home") { e.preventDefault(); items[0]?.focus(); }
+            else if (e.key === "End") { e.preventDefault(); items[items.length - 1]?.focus(); }
+            else if (e.key === "Escape") { e.preventDefault(); hide(); }
+        });
+
+        document.documentElement.appendChild(root);
+        window.__pg_toolbar_root = root;
+
+        window.__pg_toolbar_updateTheme = () => {
+            const cc = pgColors();
+            root.style.background = cc.toolbarBg;
+            root.style.color = cc.text;
+            root.style.border = `1px solid ${cc.border}`;
+            root.style.setProperty("--pg-focus", cc.focus);
+            root.querySelectorAll(".pagegenie-btn").forEach(b => {
+                b.style.background = cc.btn;
+                b.style.border = `1px solid ${cc.border}`;
+                b.style.color = cc.text;
+            });
+        };
+
+        function on(id, fn) { handlers[id] = fn; }
+        function show(pos) {
+            root.style.display = "flex";
+            root.style.top = (pos.top - 44) + "px";
+            root.style.left = pos.left + "px";
+            root.classList.remove("pg-open");
+            void root.offsetWidth;
+            root.classList.add("pg-open");
+            btns[0]?.focus();
+            window.__pg_toolbar_updateTheme?.();
+        }
+        function hide() { root.style.display = "none"; root.classList.remove("pg-open"); }
+
+        return { on, show, hide };
     }
 
+    function createLoadingToast(initialMessage = "Loading…") {
+        pgInjectStyles();
+        const c = pgColors();
 
+        const el = document.createElement("div");
+        el.className = "pg-toast";
+        const icon = document.createElement("span");
+        icon.textContent = "⏳";
+        icon.style.marginRight = "8px";
+        const text = document.createElement("span");
+        text.textContent = initialMessage;
+
+        Object.assign(el.style, {
+            position: "fixed",
+            left: "20px",
+            bottom: "20px",
+            background: c.toastBg,
+            color: "#fff",
+            padding: "10px 12px",
+            borderRadius: "10px",
+            border: `1px solid ${c.border}`,
+            zIndex: "2147483647",
+            display: "flex",
+            alignItems: "center",
+            maxWidth: "60vw",
+            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+            opacity: "0",
+            transform: "translateY(8px)"
+        });
+
+        el.append(icon, text);
+        document.documentElement.appendChild(el);
+        setTimeout(() => el.classList.add("pg-toast-show"), 10);
+
+        let dots = 0;
+        const interval = setInterval(() => {
+            dots = (dots + 1) % 4;
+            const base = text.dataset.base || text.textContent.replace(/\.*$/, "");
+            text.dataset.base = base;
+            text.textContent = base + ".".repeat(dots);
+        }, 400);
+
+        function set(msg) { delete text.dataset.base; text.textContent = msg; }
+        function success(msg = "Done") {
+            clearInterval(interval);
+            icon.textContent = "✅"; set(msg);
+            el.style.background = "rgba(8, 80, 30, 0.96)";
+            setTimeout(close, 900);
+        }
+        function error(msg = "Error") {
+            clearInterval(interval);
+            icon.textContent = "⚠️"; set(msg);
+            el.style.background = "rgba(120, 20, 20, 0.96)";
+            setTimeout(close, 1400);
+        }
+        function close() { try { el.remove(); } catch {} }
+        return { set, success, error, close };
+    }
+
+    function escapeHtml(str) {
+        return String(str).replace(/[&<>"']/g, s => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[s]));
+    }
+    function injectPageBridge() {
+        try {
+            if (!chrome?.runtime?.getURL) return;
+            const src = chrome.runtime.getURL("content/pageBridge.js");
+            if (document.getElementById("pagegenie-bridge-script")) return;
+            if (document.documentElement.querySelector(`script[src="${src}"]`)) return;
+            const script = document.createElement("script");
+            script.id = "pagegenie-bridge-script";
+            script.src = src;
+            script.type = "text/javascript";
+            (document.head || document.documentElement).appendChild(script);
+        } catch {}
+    }
 
     // Dev/test hooks
     window.__pg_showSuggestions = function(example) {

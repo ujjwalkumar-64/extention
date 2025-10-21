@@ -1,4 +1,5 @@
 :root {
+    /* Dark */
     --bg: #0f1115;
     --fg: #e8eaf0;
     --muted: #9aa3b2;
@@ -7,8 +8,22 @@
     --ok: #22c55e;
     --warn: #f59e0b;
     --err: #ef4444;
-    --border: rgba(255,255,255,0.12);
-    --border2: rgba(255,255,255,0.08);
+    --border: rgba(255,255,255,0.14);
+    --border2: rgba(255,255,255,0.10);
+    --focus: #3b82f6;
+}
+:root[data-theme="light"] {
+    --bg: #ffffff;
+    --fg: #0b1220;
+    --muted: #4d5b78;
+    --surface: #f4f6fa;
+    --accent: #2563eb;
+    --ok: #16a34a;
+    --warn: #d97706;
+    --err: #dc2626;
+    --border: rgba(0,0,0,0.14);
+    --border2: rgba(0,0,0,0.08);
+    --focus: #1d4ed8;
 }
 
 html, body {
@@ -23,6 +38,7 @@ html, body {
     box-sizing: border-box;
     padding: 12px 12px 16px;
     width: 360px;
+    max-width: 100vw;
 }
 
 .pg-header {
@@ -35,14 +51,18 @@ html, body {
 .pg-title {
     font-weight: 800;
     font-size: 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
 }
+.pg-logo { filter: saturate(1.1); }
 
 .pg-badge {
     font-size: 11px;
-    color: #cbd5e1;
-    background: #11151c;
+    color: var(--muted);
+    background: var(--surface);
     border: 1px solid var(--border2);
-    padding: 3px 8px;
+    padding: 4px 10px;
     border-radius: 999px;
 }
 
@@ -60,7 +80,7 @@ html, body {
 .pg-status.err { color: var(--err); }
 
 .card {
-    background: #0b0d12;
+    background: var(--surface);
     border: 1px solid var(--border2);
     border-radius: 10px;
     padding: 10px 12px;
@@ -89,12 +109,16 @@ input[type="password"],
 .pg-select {
     width: 100%;
     box-sizing: border-box;
-    background: #0f141c;
-    color: #e2e6ee;
+    background: var(--bg);
+    color: var(--fg);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 8px 10px;
     outline: none;
+}
+input:focus, .pg-select:focus {
+    border-color: var(--focus);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 28%, transparent);
 }
 
 .pg-btn {
@@ -105,22 +129,18 @@ input[type="password"],
     border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
+    transition: transform .08s ease, background .15s ease;
 }
-.pg-btn:hover { background: #3a3a3a; }
-.pg-btn.primary {
-    background: #155e75;
-    border-color: #134e5e;
+:root[data-theme="light"] .pg-btn {
+    background: #1f2937;
+    color: #fff;
 }
-.pg-btn.primary:hover {
-    background: #1b6b85;
-}
-.pg-btn.danger {
-    background: #7a1f1f;
-    border-color: #6a1b1b;
-}
-.pg-btn.danger:hover {
-    background: #8a2424;
-}
+.pg-btn:hover { background: #3a3a3a; transform: translateY(-1px); }
+.pg-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pg-btn.primary { background: #155e75; border-color: #134e5e; }
+.pg-btn.primary:hover { background: #1b6b85; }
+.pg-btn.danger { background: #7a1f1f; border-color: #6a1b1b; }
+.pg-btn.danger:hover { background: #8a2424; }
 
 .divider {
     text-align: center;
@@ -129,7 +149,7 @@ input[type="password"],
     position: relative;
 }
 .divider span {
-    background: #0b0d12;
+    background: var(--surface);
     padding: 0 8px;
     position: relative;
     z-index: 1;
@@ -157,11 +177,20 @@ input[type="password"],
 .w100 { width: 100%; }
 
 .toggle {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 8px;
     user-select: none;
+    cursor: pointer;
 }
 
 .muted { color: var(--muted); font-size: 12px; }
 ul.muted { padding-left: 18px; }
+
+/* Responsive tweaks for ≤ 320px */
+@media (max-width: 340px) {
+    #app { padding: 8px; }
+    .pg-title { font-size: 15px; }
+    .pg-btn { font-size: 12px; padding: 7px 9px; }
+    input[type="text"], input[type="password"], .pg-select { padding: 7px 9px; }
+}

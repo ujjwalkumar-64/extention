@@ -3,19 +3,23 @@
 <head>
     <meta charset="utf-8" />
     <title>PageGenie</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
 <div id="app">
     <header class="pg-header">
-        <div class="pg-title">PageGenie</div>
-        <div id="authBadge" class="pg-badge">Signed out</div>
+        <div class="pg-title">
+            <span class="pg-logo" aria-hidden="true">🧞</span>
+            <span>PageGenie</span>
+        </div>
+        <div id="authBadge" class="pg-badge" aria-live="polite">Signed out</div>
     </header>
 
     <div id="status" class="pg-status" hidden></div>
 
     <!-- Auth: Signed-out -->
-    <section id="authAnon" class="card">
+    <section id="authAnon" class="card" aria-label="Authentication - Sign in or Sign up">
         <div class="section-title">Sign in</div>
         <form id="loginForm" class="form-grid">
             <label>
@@ -29,7 +33,7 @@
             <button id="loginBtn" type="submit" class="pg-btn primary">Log in</button>
         </form>
 
-        <div class="divider"><span>or</span></div>
+        <div class="divider" role="separator" aria-label="or"><span>or</span></div>
 
         <div id="signupWrap">
             <div class="section-title">Create an account</div>
@@ -52,25 +56,25 @@
     </section>
 
     <!-- Auth: Signed-in -->
-    <section id="authUser" class="card" hidden>
+    <section id="authUser" class="card" hidden aria-label="Account actions">
         <div class="section-title">Account</div>
         <div class="row">
             <div id="welcome" class="welcome">Welcome!</div>
         </div>
         <div class="row gap">
-            <button id="readingModeBtn" class="pg-btn">Open Reading Mode</button>
-            <button id="openHubBtn" class="pg-btn">Open Library</button>
-            <button id="logoutBtn" class="pg-btn danger">Log out</button>
+            <button id="readingModeBtn" class="pg-btn" aria-label="Open reading mode">Open Reading Mode</button>
+            <button id="openHubBtn" class="pg-btn" aria-label="Open library">Open Library</button>
+            <button id="logoutBtn" class="pg-btn danger" aria-label="Log out">Log out</button>
         </div>
     </section>
 
     <!-- Settings -->
-    <section class="card">
+    <section class="card" aria-label="Settings">
         <div class="section-title">Settings</div>
         <div class="settings-grid">
             <label class="w100">
                 <span class="lbl">Mode</span>
-                <select id="mode" class="pg-select">
+                <select id="mode" class="pg-select" aria-label="AI mode">
                     <option value="auto">Auto (prefer on-device, fallback online)</option>
                     <option value="offline-only">Offline only (on-device required)</option>
                     <option value="online-only">Online only (always use backend)</option>
@@ -82,19 +86,41 @@
                 <span>Show toolbar on selection</span>
             </label>
 
-            <!-- NEW: Floating button toggle -->
             <label class="toggle">
                 <input id="toggleFloatingButton" type="checkbox" />
                 <span>Show floating button (always visible)</span>
             </label>
+
+            <!-- Theme -->
+            <label class="w100">
+                <span class="lbl">Theme</span>
+                <select id="theme" class="pg-select" aria-label="Theme">
+                    <option value="system">System</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                </select>
+            </label>
+
+            <!-- Persona presets -->
+            <label class="w100">
+                <span class="lbl">Persona preset</span>
+                <select id="personaPreset" class="pg-select" title="Tailor prompts for a persona" aria-label="Persona preset">
+                    <option value="general">General</option>
+                    <option value="student">Student</option>
+                    <option value="researcher">Researcher</option>
+                    <option value="editor">Editor</option>
+                </select>
+            </label>
+
+            <!-- Cite sources -->
             <label class="toggle">
-                <input id="toggleFullPageConfirm" type="checkbox" />
-                <span>Ask before processing full page (no selection)</span>
+                <input id="citeSources" type="checkbox" />
+                <span>Prefer citing sources when available</span>
             </label>
 
             <label class="w100">
                 <span class="lbl">Target language</span>
-                <select id="targetLang" class="pg-select">
+                <select id="targetLang" class="pg-select" aria-label="Target language">
                     <option value="en">English (en)</option>
                     <option value="hi">Hindi (hi)</option>
                     <option value="es">Spanish (es)</option>
@@ -120,7 +146,7 @@
     </section>
 
     <!-- About -->
-    <section class="card">
+    <section class="card" aria-label="About PageGenie">
         <div class="section-title">About PageGenie</div>
         <p class="muted">
             PageGenie brings AI-powered reading and writing tools to any web page. It prefers fast, private
@@ -128,7 +154,7 @@
         </p>
         <ul class="muted">
             <li>Selection toolbar: Summarize, Explain, Rewrite, Translate, Save</li>
-            <li>Quick fixes: Proofread replacement, Translation overlay, Insert code comments</li>
+            <li>Quick fixes: Proofread replacement, Translation overlay, Insert Code Comments</li>
             <li>Modes: Auto, Offline only, Online only</li>
             <li>“Quiz Me” and Curated Reading via backend</li>
         </ul>

@@ -24,6 +24,8 @@ const show = (text) => { outEl.textContent = text; };
 const showResult = (text) => { resultSectionEl.style.display = ""; resultEl.textContent = text; };
 
 let fullText = ""; // keeps full parsed text for action bar
+let persona = "general";
+let citeSources = false;
 
 // Configure pdf.js worker (ESM build: use module Worker via workerPort)
 const workerUrl = new URL("../libs/pdfjs/pdf.worker.min.mjs", import.meta.url);
@@ -143,29 +145,53 @@ async function processUrl(src) {
     }
 }
 
+function tryParseStructuredResult(text) {
+    try {
+        const obj = JSON.parse(text);
+        if (obj && Array.isArray(obj.bullets) && Array.isArray(obj.citations)) return obj;
+    } catch {}
+    return null;
+}
+function renderStructuredResult({ bullets = [], citations = [] } = {}) {
+    resultSectionEl.style.display = "";
+    const lines = [];
+    if (bullets.length) {
+        lines.push("Summary:");
+        bullets.forEach((b, i) => lines.push(`- ${b}`));
+        lines.push("");
+    }
+    if (citations.length) {
+        lines.push("References:");
+        citations.forEach((c, i) => lines.push(`${i + 1}. ${c.title || c.url || "Source"}${c.url ? ` (${c.url})` : ""}${c.note ? ` — ${c.note}` : ""}`));
+    }
+    resultEl.textContent = lines.join("\n");
+}
+
 // Backend action via background (central auth + error handling)
 async function runAction(action) {
-    if (!fullText) {
-        setStatus("No parsed text available. Load a PDF first.", "warn");
-        return;
-    }
+    if (!fullText) { setStatus("No parsed text available. Load a PDF first.", "warn"); return; }
     const targetLang = (targetLangEl?.value || "en").trim();
     setStatus(`Running ${action}…`);
     resultSectionEl.style.display = "none";
     resultEl.textContent = "";
 
     try {
+        const structured = (action === "summarize" || action === "explain");
         const resp = await chrome.runtime.sendMessage({
             type: "PAGEGENIE_PERSIST",
             endpoint: "/api/v1/ai",
-            payload: { text: fullText, action, targetLang }
+            payload: { text: fullText, action, targetLang, persona, citeSources, structured } // NEW
         });
 
         if (!resp?.ok) throw new Error(resp?.error || "Backend error");
         const data = resp.data || {};
         const out = data.result || data.output || data?.data?.result || data?.data?.output || "";
         if (!out) throw new Error("Empty result from backend");
-        showResult(out);
+
+        const s = tryParseStructuredResult(out);
+        if (s) renderStructuredResult(s);
+        else { resultSectionEl.style.display = ""; resultEl.textContent = out; }
+
         setStatus("Done", "ok");
     } catch (e) {
         setStatus("Error: " + (e?.message || String(e)), "err");
@@ -263,6 +289,8 @@ function enableFallbackUI() {
     try {
         const cfg = await chrome.storage.sync.get({ targetLang: "en" });
         if (cfg?.targetLang && targetLangEl) targetLangEl.value = cfg.targetLang;
+        persona = cfg?.persona || "general";
+        citeSources = !!cfg?.citeSources;
     } catch {}
 
     const u = new URL(location.href);
