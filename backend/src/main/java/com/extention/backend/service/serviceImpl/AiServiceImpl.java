@@ -56,8 +56,8 @@ public class AiServiceImpl implements AiService {
         // If structured and summarize/explain, return JSON with bullets[] and citations[]
         if (structured && (isSummarize || isExplain)) {
             String task = isSummarize
-                    ? "Summarize the following text into 3–5 concise bullet points."
-                    : "Explain the following text clearly and structurally in 3–5 concise bullet points.";
+                    ? "Summarize the following text into  concise bullet points."
+                    : "Explain the following text clearly and structurally in  concise bullet points.";
             String schema = """
                     Output STRICT JSON (no extra text) matching:
                     {
@@ -94,7 +94,7 @@ public class AiServiceImpl implements AiService {
 
         // Otherwise, return plain text for other ops (or non-structured)
         String opInstruction = switch (req.action()) {
-            case summarize -> "Summarize the following text in 3–5 concise bullet points.";
+            case summarize -> "Summarize the following text in concise bullet points.";
             case explain -> "Explain the following text with clear structure.";
             case rewrite -> "Rewrite the following text to improve clarity and style while preserving meaning and voice.";
             case translate -> "Translate the following text to %s. Preserve formatting, tone, and any Markdown or code blocks.".formatted(safe(req.targetLang()));

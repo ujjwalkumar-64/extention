@@ -187,27 +187,6 @@
         return promptSessionPromise;
     }
 
-    function buildPrompt(operation, text, targetLang) {
-        switch (operation) {
-            case "summarize":
-            case "summarize_full":
-            case "process_full":
-                return `Summarize the following text concisely in bullet points.\nReturn only the summary.\n\n---\n${text}\n---`;
-            case "explain":
-                return `Explain the following text for a general audience.\nBe clear and concise. Return only the explanation.\n\n---\n${text}\n---`;
-            case "rewrite":
-                return `Rewrite the following text to improve clarity and flow without changing meaning.\nReturn only the rewritten text.\n\n---\n${text}\n---`;
-            case "proofread":
-                return `Proofread and correct grammar and spelling.\nKeep the original meaning and voice. Return only the corrected text.\n\n---\n${text}\n---`;
-            case "translate":
-                return `Translate the following text to ${targetLang || "en"}.\nReturn only the translation (no notes or explanations).\n\n---\n${text}\n---`;
-            case "comment_code":
-                return `Add clear, explanatory comments to this code using appropriate line comment syntax for the language (e.g., //, #, --). Do not change behavior. Do not wrap in Markdown fences. Return only the full commented code.\n\n---\n${text}\n---`;
-            default:
-                return `Process the following and return only the result:\n\n---\n${text}\n---`;
-        }
-    }
-
     // --------------- Caches (per-page) ---------------
 
     const translatorCache = new Map();  // key: `${src}|${dst}` -> instance
