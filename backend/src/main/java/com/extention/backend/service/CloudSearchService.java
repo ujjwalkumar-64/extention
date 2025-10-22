@@ -1,9 +1,9 @@
 package com.extention.backend.service;
 
-import com.extention.backend.controller.SourcesController;
+import com.extention.backend.response.SearchItem;
 
 import java.util.List;
 
 public interface CloudSearchService {
-   List<SourcesController.Suggestion> findSources(String text, String sourceUrl, String persona);
+    List<SearchItem> findSources(String text, String sourceUrl, String persona, int size);
 }

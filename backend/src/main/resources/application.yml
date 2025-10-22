@@ -21,4 +21,7 @@ server:
 application:
   config:
     GEMINI_API_KEY: AIzaSyD7coKlIb1Wey8P2rHVHYoaiHB4stzCbZE
+    GOOGLE_CSE_API_KEY: AIzaSyCQsL9ABcDKGe-eLtkPkKfYbzI08KZ3Dvo
+    GOOGLE_CSE_CX: a2ca579b02db84b73
+
 debug: true

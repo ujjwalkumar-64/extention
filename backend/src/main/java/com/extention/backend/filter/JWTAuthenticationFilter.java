@@ -50,7 +50,7 @@ public class JWTAuthenticationFilter extends OncePerRequestFilter {
 
 
         if(authResult.isAuthenticated() ){
-            String token= jwtUtil.generateToken(authResult.getName(),user,15); //15min
+            String token= jwtUtil.generateToken(authResult.getName(),user,60); //60 min
             response.setHeader("Authorization","Bearer "+token);
 
         }
