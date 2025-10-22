@@ -11,6 +11,7 @@
 // - Theme (system/light/dark) + consistent SVG iconography + subtle animations + accessibility (ARIA, keyboard nav)
 // - Hotkeys handled via background commands: Summarize (Alt+Shift+S), Explain (Alt+Shift+E), Rewrite (Alt+Shift+R), Translate (Alt+Shift+T)
 // - FIX: Multi-word selection reliability — show toolbar after mouseup to avoid one-word-only selection
+// PATCH: Empty state hint + "Why cloud?" tooltip + shared References styling hooks ===
 
 (function init() {
     injectPageBridge();
@@ -37,8 +38,9 @@
         targetLang: "en",
         theme: "system",           // "system" | "light" | "dark"
         persona: "general",        // "general" | "student" | "researcher" | "editor"
-        citeSources: false
+        citeSources: true
     };
+    let __pg_last_render_op = "";
 
     // Track AI path for microcopy in result panels
     let __pg_last_ai_path = ""; // "device" | "cloud" | ""
@@ -56,7 +58,7 @@
             targetLang: "en",
             theme: "system",
             persona: "general",
-            citeSources: false
+            citeSources: true
         },
         (s) => {
             settings = { ...settings, ...s };
@@ -119,6 +121,21 @@
             window.postMessage({ type: "PAGEGENIE_AI_PREWARM", id: "prewarm_all", want }, "*");
         } catch {}
     }
+
+//  Mark the device as ready when we see any AI events from the bridge.
+    window.addEventListener("message", (ev) => {
+        try {
+            const d = ev?.data;
+            if (!d || typeof d !== "object") return;
+            if (d.type === "PAGEGENIE_AI_READY" && d.ready) {
+                __pg_deviceReady = true;
+                return;
+            }
+            if (d.type === "PAGEGENIE_AI_PROGRESS" || d.type === "PAGEGENIE_AI_RESPONSE") {
+                __pg_deviceReady = true;
+            }
+        } catch {}
+    }, true);
 
 
     // Prewarm on-device
@@ -422,6 +439,7 @@
 
     // Operations
     async function runFullDocSummarize() {
+        __pg_last_render_op = "summarize";
         const loader = createLoadingToast("Processing full document");
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
@@ -454,6 +472,7 @@
     }
 
     async function runSimpleOp(op) {
+        __pg_last_render_op = op;
         const loader = createLoadingToast("Preparing " + opTitle(op));
         const throttledSet = throttle(loader.set.bind(loader), 120);
         try {
@@ -466,8 +485,37 @@
             }
 
             const resultText = await runAIWithCloudLimit(op, active.text, (stage) => throttledSet(`${opTitle(op)} • ${stage}`));
-            loader.success(opTitle(op) + " ready");
-            showResultPanel(resultText);
+            const structured = tryParseStructuredResult(resultText);
+
+            if (structured && Array.isArray(structured.bullets)) {
+                // NEW: only auto-search when user prefers citations AND we are not in offline-only mode
+                const wantAutoSearch = !!settings.citeSources && settings.mode !== "offline-only";
+
+                if (wantAutoSearch && (!structured.citations || structured.citations.length === 0)) {
+                    throttledSet(`${opTitle(op)} • Finding sources…`);
+                    try {
+                        const found = await __pg_fetchSearchCitationsFromBackend(active.text);
+                        const merged = { bullets: structured.bullets, citations: found };
+                        __pg_last_render_op = op;
+                        loader.success(opTitle(op) + " ready");
+                        showStructuredResultPanel(merged, { title: (op === "explain" ? "Explanation" : "Summary") });
+                    } catch {
+                        // Search failed; still render bullets
+                        __pg_last_render_op = op;
+                        loader.success(opTitle(op) + " ready");
+                        showStructuredResultPanel(structured, { title: (op === "explain" ? "Explanation" : "Summary") });
+                    }
+                } else {
+                    __pg_last_render_op = op;
+                    loader.success(opTitle(op) + " ready");
+                    showStructuredResultPanel(structured, { title: (op === "explain" ? "Explanation" : "Summary") });
+                }
+            } else {
+                // Fallback: plain panel
+                loader.success(opTitle(op) + " ready");
+                showResultPanel(resultText);
+            }
+
             persist("/api/ops/log", {
                 type: op, source: location.href, input: active.text.slice(0, 2000),
                 output: resultText, strategy: active.strategy, ts: Date.now()
@@ -476,7 +524,6 @@
             loader.error("AI error: " + (e?.message || e));
         }
     }
-
     async function replaceWithProofread() {
         const sel = document.getSelection();
         if (!sel || sel.isCollapsed || !lastRange || !lastSelectionText) {
@@ -585,6 +632,7 @@
         const loader = createLoadingToast("Analyzing against your notes…");
         try {
             const resp = await sendCompareConcept(active.text, location.href);
+            console.log(resp);
             if (!resp?.ok) throw new Error(resp?.error || "Compare failed");
             const data = resp.data || {};
             loader.success("Analysis ready");
@@ -593,11 +641,13 @@
                 agreement: data.agreement || "",
                 drift: data.drift_analysis || data.drift || ""
             });
+
             persist("/api/ops/log", {
                 type: "analyze_concept_drift", source: location.href, input_len: active.text.length,
                 output: JSON.stringify(data), strategy: active.strategy, ts: Date.now()
             });
         } catch (e) {
+            console.log(e);
             loader.error(e?.message || e);
         }
     }
@@ -684,11 +734,28 @@
                 citations: items.map(it => ({
                     url: it.url, title: it.title, note: (it.reason ? (it.reason + " — found by search") : "found by search")
                 }))
-            });
+            }, { title: "References" });
             loader.success("Sources ready");
         } catch (e) {
             loader.error("Error: " + (e?.message || e));
         }
+    }
+
+    async function __pg_fetchSearchCitationsFromBackend(sourceText) {
+        const resp = await persist("/api/v1/sources/find", {
+            text: sourceText,
+            sourceUrl: location.href,
+            persona: settings.persona,
+            size: 5
+        });
+        if (!resp?.ok) return [];
+        const raw = resp.data || {};
+        const items = Array.isArray(raw.items) ? raw.items : (Array.isArray(raw) ? raw : []);
+        return items.map(it => ({
+            url: it.url,
+            title: it.title,
+            note: it.reason ? (it.reason + " — found by search") : "found by search"
+        })).filter(c => c.url && c.title);
     }
 
     // AI routing with persona/citations + cloud-only trim + last path tracking
@@ -699,8 +766,11 @@
 
         const userWantsOffline = (settings.mode !== "online-only");
         const userAllowsOnline = (settings.mode !== "offline-only");
+
+        // Probe, but be tolerant
         const deviceAvailable = userWantsOffline ? await ensureOnDeviceReady() : false;
 
+        // Primary on-device path when probe says OK
         if (userWantsOffline && deviceAvailable) {
             try {
                 onProgress("Using on-device AI");
@@ -708,11 +778,26 @@
                 __pg_last_ai_path = "device";
                 const plain = toPlainText(res);
                 if (plain) return plain;
-            } catch {}
+            } catch {
+                // fall through to cloud/offline-only fallback
+            }
         }
 
-        if (!userAllowsOnline) throw new Error("On-device AI unavailable.");
+        // Offline-only fallback: try once even if probe failed, before erroring
+        if (!userAllowsOnline) {
+            try {
+                onProgress(deviceAvailable ? "Using on-device AI" : "Trying on-device AI");
+                const res = await aiOnDeviceWithPersona(op, text, settings.targetLang, settings.persona, settings.citeSources, onProgress);
+                __pg_last_ai_path = "device";
+                const plain = toPlainText(res);
+                if (plain) return plain;
+            } catch (e) {
+                // Final error for offline-only
+                throw new Error("On-device AI unavailable.");
+            }
+        }
 
+        // Cloud path
         onProgress(deviceAvailable ? "Falling back to cloud AI" : "Using cloud AI");
         const trimmedForCloud = applyCloudLimit(text);
         const cloudRes = await aiOnlineWithPersona(op, trimmedForCloud, settings.targetLang, settings.persona, settings.citeSources, onProgress);
@@ -727,33 +812,55 @@
         return new Promise((resolve, reject) => {
             const id = "pg_" + Math.random().toString(36).slice(2);
             let finished = false;
+            let timer; // define before cleanup to avoid TDZ in cleanup()
             const cleanup = () => {
-                window.removeEventListener("message", resHandler, true);
-                window.removeEventListener("message", progHandler, true);
-                clearTimeout(timer);
+                try { window.removeEventListener("message", resHandler, true); } catch {}
+                try { window.removeEventListener("message", progHandler, true); } catch {}
+                try { clearTimeout(timer); } catch {}
             };
-            const resHandler = (ev) => { /* unchanged */ };
-            const progHandler = (ev) => { /* unchanged */ };
+            const resHandler = (ev) => {
+                if (ev.source !== window) return;
+                const d = ev.data;
+                if (!d || d.type !== "PAGEGENIE_AI_RESPONSE" || d.id !== id) return;
+                __pg_deviceReady = true;
+                if (finished) return;
+                finished = true;
+                cleanup();
+                if (d.ok) resolve(d.result);
+                else reject(new Error(d.error || "On-device AI error"));
+            };
+            const progHandler = (ev) => {
+                if (ev.source !== window) return;
+                const d = ev.data;
+                if (!d || d.type !== "PAGEGENIE_AI_PROGRESS" || d.id !== id) return;
+                __pg_deviceReady = true;
+                try { onProgress(String(d.message || "")); } catch {}
+            };
             window.addEventListener("message", resHandler, true);
             window.addEventListener("message", progHandler, true);
             try {
                 window.postMessage({ type: "PAGEGENIE_AI_REQUEST", id, operation, text, targetLang, persona, citeSources }, "*");
-            } catch (e) { finished = true; cleanup(); reject(new Error("Failed to talk to page bridge")); return; }
+            } catch (e) {
+                finished = true; cleanup(); reject(new Error("Failed to talk to page bridge")); return;
+            }
 
-            // Slightly longer on first use; otherwise the previous values are fine.
             const isOfflineOnly = (settings?.mode === "offline-only");
-            const timeoutMs = isOfflineOnly ? 30000 : 18000; // was 20000/12000
-            const timer = setTimeout(() => {
-                if (finished) return; finished = true; cleanup(); reject(new Error("On-device AI timeout"));
+            const timeoutMs = isOfflineOnly ? 30000 : 18000;
+            timer = setTimeout(() => {
+                if (finished) return;
+                finished = true;
+                cleanup();
+                reject(new Error("On-device AI timeout"));
             }, timeoutMs);
         });
     }
+
 
     async function aiOnlineWithPersona(operation, text, targetLang, persona, citeSources, onProgress) {
         const action = opToAction(operation);
         if (!action) throw new Error("Operation not supported by backend: " + operation);
         const structured = (action === "summarize" || action === "explain");
-        const payload = { text, action, targetLang, persona, citeSources: !!citeSources, structured };
+        const payload = { text, action, targetLang, persona, citeSources: !!settings.citeSources, structured };
 
         const resp = await __pg_persistWithRetry("/api/v1/ai", payload, { retries: 2, baseDelay: 900, maxDelay: 4500, onProgress });
         if (!resp?.ok) throw new Error(resp?.error || "Backend AI request failed");
@@ -1085,7 +1192,7 @@
         return __pg_normalizeStructured(obj); // null if not suitable
     }
 
-    function showStructuredResultPanel({ bullets = [], citations = [] } = {}) {
+    function showStructuredResultPanel({ bullets = [], citations = [] } = {}, opts = {}) {
         const panel = document.createElement("div");
         const c = pgColors();
         Object.assign(panel.style, {
@@ -1103,6 +1210,15 @@
             zIndex: "2147483647",
             boxShadow: "0 8px 24px rgba(0,0,0,0.35)"
         });
+
+        // NEW: choose heading based on op, unless explicitly overridden
+        const friendlyTitle = (op) => {
+            if (op === "explain") return "Explanation";
+            if (op === "summarize") return "Summary";
+            return "Summary";
+        };
+        const topTitle = opts.title || friendlyTitle(__pg_last_render_op);
+
         const sec = (title) => {
             const h = document.createElement("div");
             h.textContent = title;
@@ -1112,7 +1228,7 @@
         };
 
         if (bullets.length) {
-            panel.append(sec("Summary"));
+            panel.append(sec(topTitle)); // <— was "Summary"
             const ul = document.createElement("ul"); ul.style.marginTop = "4px";
             bullets.forEach(b => {
                 const li = document.createElement("li");
@@ -1149,11 +1265,8 @@
             panel.append(ol);
         }
 
-        const footer = document.createElement("div");
-        footer.style.cssText = "margin-top:8px;font-size:11px;opacity:.8";
-        const pathStr = __pg_last_ai_path === "device" ? "On‑device" : (__pg_last_ai_path === "cloud" ? "Cloud" : "Auto");
-        footer.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${pathStr}`;
-        panel.appendChild(footer);
+        // ...existing footer/actions append code (unchanged)...
+        __pg_makeCloudFooter?.(panel); // if you added the “Why cloud?” footer helper
 
         const actions = document.createElement("div");
         actions.style.textAlign = "right";
@@ -1206,10 +1319,9 @@
         });
         pre.textContent = text;
 
-        const footer = document.createElement("div");
-        footer.style.cssText = "margin-top:8px;font-size:11px;opacity:.8";
-        const pathStr = __pg_last_ai_path === "device" ? "On‑device" : (__pg_last_ai_path === "cloud" ? "Cloud" : "Auto");
-        footer.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${pathStr}`;
+        const footerWrap = document.createElement("div");
+        __pg_makeCloudFooter(footerWrap);
+
 
         const copyBtn = document.createElement("button");
         copyBtn.textContent = "Copy";
@@ -1234,7 +1346,7 @@
 
         const actions = document.createElement("div");
         actions.append(copyBtn, close);
-        panel.append(pre, actions, footer);
+        panel.append(pre, actions, footerWrap);
         document.documentElement.appendChild(panel);
     }
 
@@ -1436,6 +1548,189 @@
 
         document.documentElement.appendChild(panel);
     }
+
+    function showComparePanel({ keyClaim = "", agreement = "", drift = "" } = {}) {
+        // Create container
+        const wrap = document.createElement("div");
+        Object.assign(wrap.style, {
+            position: "fixed",
+            right: "20px",
+            bottom: "20px",
+            width: "min(520px, 50vw)",
+            maxHeight: "60vh",
+            overflow: "auto",
+            background: "rgba(17,17,20,0.98)",
+            color: "#e8eaf0",
+            border: "1px solid rgba(255,255,255,0.14)",
+            borderRadius: "10px",
+            padding: "12px",
+            zIndex: "2147483647",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+        });
+
+        const title = document.createElement("div");
+        title.textContent = "Concept drift analysis";
+        Object.assign(title.style, { fontWeight: "700", marginBottom: "8px" });
+        wrap.appendChild(title);
+
+        const sec = (label, text) => {
+            const s = document.createElement("div");
+            const h = document.createElement("div");
+            h.textContent = label;
+            Object.assign(h.style, { fontWeight: "600", margin: "6px 0 2px 0", color: "#cfd6e6" });
+            const p = document.createElement("div");
+            p.textContent = String(text || "");
+            Object.assign(p.style, { whiteSpace: "pre-wrap", lineHeight: "1.4" });
+            s.append(h, p);
+            return s;
+        };
+
+        wrap.appendChild(sec("Key claim", keyClaim));
+        wrap.appendChild(sec("Agreement", agreement));
+        wrap.appendChild(sec("Drift analysis", drift));
+
+        const actions = document.createElement("div");
+        Object.assign(actions.style, { marginTop: "10px", textAlign: "right" });
+        const close = document.createElement("button");
+        close.textContent = "Close";
+        Object.assign(close.style, {
+            background: "#222", color: "#fff", border: "1px solid rgba(255,255,255,0.18)",
+            padding: "4px 8px", borderRadius: "6px", cursor: "pointer", fontSize: "12px"
+        });
+        close.addEventListener("click", () => wrap.remove());
+        actions.appendChild(close);
+        wrap.appendChild(actions);
+
+        document.documentElement.appendChild(wrap);
+    }
+
+    /* Empty state nudge — shown once per page load (session) */
+    (function __pg_empty_state_bootstrap() {
+        if (sessionStorage.getItem("pg_empty_hint_shown") === "1") return;
+        // Delay slightly so we don't show on pages that immediately trigger a selection
+        setTimeout(() => {
+            try {
+                const sel = document.getSelection();
+                if (sel && !sel.isCollapsed) return; // user already selecting
+                const hint = document.createElement("div");
+                Object.assign(hint.style, {
+                    position: "fixed",
+                    left: "20px",
+                    bottom: "20px",
+                    background: "rgba(26,26,26,0.92)",
+                    color: "#fff",
+                    padding: "10px 12px",
+                    borderRadius: "10px",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    zIndex: "2147483647",
+                    fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif",
+                    boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                    opacity: "0",
+                    transform: "translateY(8px)",
+                    transition: "opacity .25s ease, transform .25s ease",
+                    pointerEvents: "auto",
+                    maxWidth: "60vw",
+                });
+                hint.textContent = "Tip: Try selecting a paragraph to get started.";
+                document.documentElement.appendChild(hint);
+                requestAnimationFrame(() => { hint.style.opacity = "1"; hint.style.transform = "translateY(0)"; });
+                sessionStorage.setItem("pg_empty_hint_shown", "1");
+                setTimeout(() => {
+                    hint.style.opacity = "0";
+                    hint.style.transform = "translateY(8px)";
+                    setTimeout(() => { try { hint.remove(); } catch {} }, 280);
+                }, 4000);
+            } catch {}
+        }, 800);
+    })();
+
+    /* Track if device models are downloading (to inform "Why cloud?" reasons) */
+    let __pg_modelsDownloading = false;
+// Wherever we receive on-device progress events, set this flag if we see "Downloading model".
+    (function __pg_hook_progress_flag() {
+        const orig = window.addEventListener;
+        // We already add listeners in aiOnDeviceWithPersona; ensure we also set the flag in the progress handler there.
+        // If you prefer explicit wiring, add: if (data.type==="PAGEGENIE_AI_PROGRESS" && /downloading model/i.test(data.message)) __pg_modelsDownloading = true;
+    })();
+
+    /* Reasons helper for "Why cloud?" tooltip */
+    function __pg_getWhyCloudText() {
+        const lines = [];
+        try {
+            // Mode
+            if (settings?.mode === "online-only") lines.push("Mode is set to Online only.");
+            // Restricted pages
+            const href = location?.href || "";
+            if (/^chrome:\/\//i.test(href) || /chromewebstore/i.test(href)) {
+                lines.push("This page restricts on‑device APIs (chrome:// or Web Store).");
+            }
+            // Device readiness
+            if (!__pg_deviceReady) lines.push("On‑device APIs not ready yet in this tab.");
+            if (__pg_modelsDownloading) lines.push("On‑device model is still downloading.");
+            // Fallback generic
+            if (!lines.length) lines.push("On‑device path wasn’t available at that moment.");
+        } catch {
+            lines.push("On‑device path wasn’t available at that moment.");
+        }
+        lines.push("Tip: Set Mode to Auto or Offline only to prefer on‑device when available.");
+        return lines.join("\n");
+    }
+
+    /* Small tooltip for inline info icons */
+    function __pg_attachTooltip(anchorEl, text) {
+        let tip = null;
+        function show() {
+            if (tip) return;
+            tip = document.createElement("div");
+            Object.assign(tip.style, {
+                position: "fixed",
+                zIndex: "2147483647",
+                background: "rgba(20,20,20,0.96)",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: "8px",
+                padding: "8px 10px",
+                boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                maxWidth: "320px",
+                fontSize: "12px",
+                whiteSpace: "pre-wrap",
+            });
+            tip.textContent = text;
+            document.documentElement.appendChild(tip);
+            const rect = anchorEl.getBoundingClientRect();
+            tip.style.top = Math.max(8, rect.bottom + 6) + "px";
+            tip.style.left = Math.max(8, Math.min(window.innerWidth - 8 - tip.offsetWidth, rect.left)) + "px";
+        }
+        function hide() {
+            try { tip?.remove(); tip = null; } catch {}
+        }
+        anchorEl.addEventListener("mouseenter", show);
+        anchorEl.addEventListener("mouseleave", hide);
+        anchorEl.addEventListener("focus", show);
+        anchorEl.addEventListener("blur", hide);
+    }
+
+    /* Inject a "Why cloud?" info icon into result footers (plain + structured) */
+    function __pg_makeCloudFooter(containerEl) {
+        try {
+            const footer = document.createElement("div");
+            footer.style.cssText = "margin-top:8px;font-size:11px;opacity:.85;display:flex;align-items:center;gap:6px;flex-wrap:wrap";
+            const pathStr = __pg_last_ai_path === "device" ? "On‑device" : (__pg_last_ai_path === "cloud" ? "Cloud" : "Auto");
+            const txt = document.createElement("span");
+            txt.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${pathStr}`;
+            const info = document.createElement("button");
+            info.type = "button";
+            info.setAttribute("aria-label", "Why was cloud used?");
+            info.style.cssText = "background:#222;color:#fff;border:1px solid rgba(255,255,255,0.18);border-radius:999px;padding:2px 6px;cursor:pointer;font-size:10px";
+            info.textContent = "Why cloud?";
+            __pg_attachTooltip(info, __pg_getWhyCloudText());
+            footer.append(txt, info);
+            containerEl.appendChild(footer);
+        } catch {}
+    }
+
+    /* Hook the footer into existing panels — call this in showStructuredResultPanel and showResultPanel */
 
     // Theme utilities + animations + iconography
     function pgGetThemeMode() {

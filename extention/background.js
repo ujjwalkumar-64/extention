@@ -434,6 +434,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                     throw new Error(`Compare failed ${res.status}: ${t || res.statusText}`);
                 }
                 const data = await res.json().catch(() => ({}));
+                console.log(data);
                 sendResponse({ ok: true, data });
             } catch (e) {
                 sendResponse({ ok: false, error: e?.message || String(e) });

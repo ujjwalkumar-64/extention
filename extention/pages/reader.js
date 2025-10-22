@@ -283,6 +283,118 @@ function enableFallbackUI() {
         }
     });
 }
+function extractFirstJsonObject(text) {
+    if (typeof text !== "string") return null;
+    let s = text.trim();
+    if (s.startsWith("```")) {
+        const nl = s.indexOf("\n");
+        if (nl !== -1) s = s.slice(nl + 1);
+        const last = s.lastIndexOf("```");
+        if (last !== -1) s = s.slice(0, last);
+        s = s.trim();
+    }
+    try { return JSON.parse(s); } catch {}
+    try { const once = JSON.parse(s); if (typeof once === "string") return JSON.parse(once); } catch {}
+    const start = s.indexOf("{"); if (start === -1) return null;
+    let brace = 0;
+    for (let i = start; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === "{") brace++;
+        else if (ch === "}") { brace--; if (brace === 0) { try { return JSON.parse(s.slice(start, i + 1)); } catch {} break; } }
+    }
+    return null;
+}
+
+function normalizeStructured(obj) {
+    if (!obj || typeof obj !== "object") return null;
+    let bullets = Array.isArray(obj.bullets) ? obj.bullets : (Array.isArray(obj.points) ? obj.points : []);
+    if (!Array.isArray(bullets)) bullets = [];
+    let citations = Array.isArray(obj.citations) ? obj.citations : (Array.isArray(obj.references) ? obj.references : []);
+    citations = (citations || []).map(c => {
+        if (c && typeof c === "object") return { url: c.url || c.href || "", title: c.title || c.text || c.url || c.href || "Source", note: c.note || c.reason || "" };
+        const s = String(c || ""); return { url: s.startsWith("http") ? s : "", title: s || "Source" };
+    });
+    if (!bullets.length) return null;
+    return { bullets: bullets.map(x => String(x ?? "")).filter(Boolean), citations };
+}
+
+// Container elements (adjust selectors to your Reader DOM)
+const root = document.querySelector(".reader-root") || document.body;
+const out = document.getElementById("reader-output") || root;
+
+/** Render structured summary/explain if possible; otherwise show plain text. */
+function renderStructuredIfAny(rawText, usedPath /* "device" | "cloud" | "" */) {
+    const obj = normalizeStructured(extractFirstJsonObject(rawText));
+    if (!obj) {
+        renderPlain(rawText, usedPath);
+        return;
+    }
+    out.innerHTML = "";
+
+    const h1 = document.createElement("div");
+    h1.className = "pg-section-title";
+    h1.textContent = "Summary";
+    out.appendChild(h1);
+
+    const ul = document.createElement("ul");
+    ul.className = "pg-summary-bullets";
+    obj.bullets.forEach(b => {
+        const li = document.createElement("li");
+        li.textContent = b;
+        ul.appendChild(li);
+    });
+    out.appendChild(ul);
+
+    if (obj.citations && obj.citations.length) {
+        const box = document.createElement("div");
+        box.className = "pg-references";
+
+        const h2 = document.createElement("div");
+        h2.className = "pg-section-title";
+        h2.textContent = "References";
+        box.appendChild(h2);
+
+        const ol = document.createElement("ol");
+        obj.citations.forEach(c => {
+            const li = document.createElement("li");
+            if (c.url) {
+                const a = document.createElement("a");
+                a.href = c.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+                a.textContent = c.title || c.url;
+                li.appendChild(a);
+            } else {
+                li.textContent = c.title || "Source";
+            }
+            if (c.note) {
+                const span = document.createElement("span");
+                span.className = "pg-ref-note";
+                span.textContent = " — " + c.note;
+                li.appendChild(span);
+            }
+            ol.appendChild(li);
+        });
+        box.appendChild(ol);
+        out.appendChild(box);
+    }
+
+    const footer = document.createElement("div");
+    footer.className = "pg-footer-tip";
+    footer.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${usedPath === "device" ? "On‑device" : (usedPath === "cloud" ? "Cloud" : "Auto")}`;
+    out.appendChild(footer);
+}
+
+function renderPlain(text, usedPath) {
+    out.innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = String(text ?? "");
+    out.appendChild(pre);
+
+    const footer = document.createElement("div");
+    footer.className = "pg-footer-tip";
+    footer.textContent = `Tip: On‑device when available; falls back to cloud. Used: ${usedPath === "device" ? "On‑device" : (usedPath === "cloud" ? "Cloud" : "Auto")}`;
+    out.appendChild(footer);
+}
 
 (async function main() {
     // Load default targetLang from settings if available

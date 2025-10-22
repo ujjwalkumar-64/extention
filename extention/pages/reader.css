@@ -9,6 +9,11 @@
     --err: #ef4444;
     --border: rgba(255,255,255,0.12);
     --border2: rgba(255,255,255,0.08);
+    --pg-text: #e8eaf0;
+    --pg-muted: #9aa3b2;
+    --pg-bg: #0f1115;
+    --pg-surface: #171a21;
+    --pg-border: rgba(255,255,255,0.14);
 }
 
 html, body {
@@ -138,4 +143,58 @@ html, body {
     margin: 0;
     max-height: 50vh;
     overflow: auto;
+}
+
+/* === PATCH: Mirror inline UI "References" styling in Reader === */
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --pg-text: #0b1220;
+        --pg-muted: #4d5b78;
+        --pg-bg: #ffffff;
+        --pg-surface: #f4f6fa;
+        --pg-border: rgba(0,0,0,0.14);
+    }
+}
+
+.reader-root {
+    color: var(--pg-text);
+}
+
+.pg-section-title {
+    font-weight: 700;
+    margin: 8px 0 4px;
+}
+
+.pg-summary-bullets {
+    margin: 6px 0 10px;
+    padding-left: 18px;
+}
+
+.pg-references {
+    background: var(--pg-surface);
+    border: 1px solid var(--pg-border);
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 10px;
+}
+.pg-references ol {
+    margin: 6px 0 0 18px;
+}
+.pg-references a {
+    color: #9fd3ff;
+    text-decoration: none;
+}
+.pg-references a:hover {
+    text-decoration: underline;
+}
+.pg-ref-note {
+    color: var(--pg-muted);
+    font-size: 12px;
+    margin-left: 6px;
+}
+.pg-footer-tip {
+    margin-top: 10px;
+    font-size: 11px;
+    opacity: .85;
 }
