@@ -66,6 +66,36 @@
     const isFn = (f) => typeof f === "function";
     const nvl = (a, b) => (a == null ? b : a);
 
+    function personaCtx(persona, operation) {
+        const p = String(persona || "general").toLowerCase();
+        if (operation === "summarize") {
+            switch (p) {
+                case "researcher": return "Summarize for a researcher: be precise, avoid hype, highlight evidence and key figures.";
+                case "student":    return "Summarize for a student: simple language, key points, one short example if useful.";
+                case "editor":     return "Summarize for an editor: very concise, clear, actionable takeaways.";
+                default:           return "Summarize clearly for a general audience.";
+            }
+        } else if (operation === "explain") {
+            switch (p) {
+                case "researcher": return "Explain for a researcher: be precise, avoid hype, note assumptions and limitations.";
+                case "student":    return "Explain for a student: simple language, step-by-step, one short example.";
+                case "editor":     return "Explain for an editor: prioritize clarity and structure; remove jargon.";
+                default:           return "Explain clearly for a general audience.";
+            }
+        }
+        return "Be clear and concise.";
+    }
+
+    function personaWriterOpts(persona) {
+        const p = String(persona || "general").toLowerCase();
+        switch (p) {
+            case "researcher": return { tone: "formal",  format: "plain-text", length: "medium" };
+            case "student":    return { tone: "neutral", format: "plain-text", length: "medium" };
+            case "editor":     return { tone: "concise", format: "plain-text", length: "short"  };
+            default:           return { tone: "neutral", format: "plain-text", length: "medium" };
+        }
+    }
+
     // Normalize any API output to plain string
     function cleanProofreadText(s) {
         // Strip common debug prefixes some local APIs may add
@@ -351,13 +381,14 @@
         return cacheSet(summarizerCache, key, inst);
     }
 
-    async function callSummarizer(id, text) {
+// Add persona-aware summarize helper
+    async function callSummarizerPersona(id, text, persona) {
         if (!window.Summarizer) throw new Error("Summarizer API not available");
         pingProgress(id, "Using Summarizer API");
         const summarizer = await getSummarizer(id);
         const input = toStringSafe(text);
         const r = await withTimeout(
-            summarizer.summarize(input, { context: "Summarize clearly for a general audience." }),
+            summarizer.summarize(input, { context: personaCtx(persona, "summarize") }),
             20000,
             "Summarizer timed out"
         );
@@ -495,20 +526,14 @@
         return cacheSet(writerCache, key, created);
     }
 
-    async function callWriterExplain(id, text) {
+    // Make Writer Explain persona-aware
+    async function callWriterExplainPersona(id, text, persona) {
         if (!window.Writer) throw new Error("Writer API not available");
         pingProgress(id, "Using Writer API (explain)");
-
-        const writer = await getWriter(id, {
-            tone: "neutral",
-            format: "plain-text",
-            length: "medium"
-        });
-
+        const writer = await getWriter(id, personaWriterOpts(persona));
         const input = toStringSafe(text);
-        const prompt = `Explain the following text clearly for a general audience:\n\n${input}`;
-        const ctx = { context: "General explanation" };
-
+        const prompt = `Explain the following text clearly:\n\n${input}`;
+        const ctx = { context: personaCtx(persona, "explain") };
         const r = await withTimeout(writer.write(prompt, ctx), 20000, "Writer timed out");
         const s = ensureText(r);
         if (isWriterMisfire(s)) throw new Error("Writer misfire");
@@ -556,22 +581,21 @@
         return chunks;
     }
 
-    // Use Summarizer if present; else Prompt; perform map (per chunk) then reduce (final)
-    async function callSummarizeLarge(id, text) {
+    // Persona-aware map-reduce summarization for large text/PDF
+    async function callSummarizeLargePersona(id, text, persona) {
         const chunks = splitIntoChunks(text);
         if (chunks.length === 1) {
-            // Single-chunk path: reuse normal summarize
             try {
-                return await callSummarizer(id, chunks[0]);
+                return await callSummarizerPersona(id, chunks[0], persona);
             } catch {
                 const s = await getPromptSession();
-                return ensureText(await withTimeout(s.prompt(buildPrompt("summarize", chunks[0])), 30000, "Prompt summarize timed out"));
+                const prompt = `${personaCtx(persona, "summarize")}\n\n---\n${chunks[0]}\n---`;
+                return ensureText(await withTimeout(s.prompt(prompt), 30000, "Prompt summarize timed out"));
             }
         }
 
         pingProgress(id, `Large document detected • ${chunks.length} parts`);
 
-        // Try Summarizer first
         let summaries = [];
         let used = "summarizer";
         try {
@@ -579,21 +603,21 @@
             for (let idx = 0; idx < chunks.length; idx++) {
                 pingProgress(id, `Summarizing part ${idx + 1}/${chunks.length}`);
                 const r = await withTimeout(
-                    summarizer.summarize(chunks[idx], { context: "Summarize clearly for a general audience." }),
-                    Math.max(30000, 12000 + chunks[idx].length), // adaptive
+                    summarizer.summarize(chunks[idx], { context: personaCtx(persona, "summarize") }),
+                    Math.max(30000, 12000 + chunks[idx].length),
                     "Summarizer chunk timed out"
                 );
                 summaries.push(ensureText(r));
             }
         } catch {
-            // Fallback to Prompt API
             used = "prompt";
             const s = await getPromptSession();
             summaries = [];
             for (let idx = 0; idx < chunks.length; idx++) {
                 pingProgress(id, `Summarizing part ${idx + 1}/${chunks.length} (Prompt)`);
+                const prompt = `${personaCtx(persona, "summarize")}\n\n---\n${chunks[idx]}\n---`;
                 const r = await withTimeout(
-                    s.prompt(buildPrompt("summarize", chunks[idx])),
+                    s.prompt(prompt),
                     Math.max(30000, 12000 + chunks[idx].length),
                     "Prompt chunk timed out"
                 );
@@ -601,7 +625,6 @@
             }
         }
 
-        // Reduce step: summarize the summaries
         const combined = summaries.map((p, i) => `Part ${i + 1}:\n${p}`).join("\n\n");
         pingProgress(id, "Combining parts into final summary");
 
@@ -609,19 +632,18 @@
             try {
                 const summarizer = await getSummarizer(id);
                 const finalR = await withTimeout(
-                    summarizer.summarize(combined, { context: "Combine the part summaries into one concise summary." }),
+                    summarizer.summarize(combined, { context: "Combine the part summaries into one concise summary for the intended audience." }),
                     Math.max(30000, 8000 + combined.length),
                     "Summarizer reduce timed out"
                 );
                 return ensureText(finalR);
-            } catch {
-                // fall through to prompt
-            }
+            } catch {}
         }
 
         const s = await getPromptSession();
+        const finalPrompt = `${personaCtx(persona, "summarize")}\n\n---\n${combined}\n---`;
         const final = await withTimeout(
-            s.prompt(buildPrompt("summarize", combined)),
+            s.prompt(finalPrompt),
             Math.max(30000, 8000 + combined.length),
             "Prompt reduce timed out"
         );
@@ -705,7 +727,7 @@
         const data = event.data;
         if (!data || data.type !== NS_REQ) return;
 
-        const { id, operation, text, targetLang } = data;
+        const { id, operation, text, targetLang, persona } = data; // NOTE: persona now read here
         const response = { type: NS_RES, id, ok: false };
 
         try {
@@ -717,7 +739,6 @@
 
             switch (operation) {
                 case "translate": {
-                    // Prefer Translator API, then Prompt
                     try {
                         output = await callTranslator(id, text, /*src*/undefined, nvl(targetLang, "en"));
                     } catch {
@@ -725,7 +746,7 @@
                         const s = await getPromptSession();
                         output = ensureText(
                             await withTimeout(
-                                s.prompt(buildPrompt("translate", text, targetLang)),
+                                s.prompt(`Translate the following text to ${targetLang || "en"}.\nReturn only the translation.\n\n---\n${text}\n---`),
                                 30000,
                                 "Prompt translate timed out"
                             )
@@ -736,30 +757,26 @@
 
                 case "summarize": {
                     try {
-                        output = await callSummarizer(id, text);
+                        output = await callSummarizerPersona(id, text, persona);
                     } catch {
                         pingProgress(id, "Using Prompt API (summarize)");
                         const s = await getPromptSession();
+                        const prompt = `${personaCtx(persona, "summarize")}\n\n---\n${toStringSafe(text)}\n---`;
                         output = ensureText(
-                            await withTimeout(
-                                s.prompt(buildPrompt("summarize", text)),
-                                30000,
-                                "Prompt summarize timed out"
-                            )
+                            await withTimeout(s.prompt(prompt), 30000, "Prompt summarize timed out")
                         );
                     }
                     break;
                 }
 
-                // New: full-document friendly summarization for PDFs/large texts
                 case "summarize_full":
                 case "process_full": {
-                    output = await callSummarizeLarge(id, text);
+                    output = await callSummarizeLargePersona(id, text, persona);
                     break;
                 }
 
                 case "proofread": {
-                    // Prefer Proofreader, then Rewriter/Writer, then Prompt
+                    // unchanged (persona usually N/A), keep existing multi-API fallback chain
                     let ok = false;
                     try { output = await callProofreader(id, text); ok = true; } catch {}
                     if (!ok) {
@@ -772,7 +789,7 @@
                         pingProgress(id, "Using Prompt API (proofread)");
                         const s = await getPromptSession();
                         const r = await withTimeout(
-                            s.prompt(buildPrompt("proofread", text)),
+                            s.prompt(`Proofread and correct grammar and spelling.\nReturn only the corrected text.\n\n---\n${toStringSafe(text)}\n---`),
                             30000,
                             "Prompt proofread timed out"
                         );
@@ -782,26 +799,28 @@
                 }
 
                 case "rewrite": {
+                    // optional persona: you can pass personaWriterOpts to getWriter for rewrite too
                     try {
                         output = await callRewriter(id, text);
                     } catch {
-                        // Try Writer generic before Prompt
                         try {
                             if ((await writerAvailability()) !== "unavailable") {
                                 pingProgress(id, "Using Writer API (rewrite)");
-                                output = await callWriterGeneric(id, text);
-                                break;
+                                const writer = await getWriter(id, personaWriterOpts(persona));
+                                const prompt = `Rewrite the following text to improve clarity and flow without changing meaning.\nReturn only the rewritten text.\n\n---\n${toStringSafe(text)}\n---`;
+                                const r = await withTimeout(writer.write(prompt, { context: "Clarity and flow" }), 20000, "Writer timed out");
+                                const s = ensureText(r);
+                                if (!isWriterMisfire(s)) { output = s; break; }
                             }
                         } catch {}
                         pingProgress(id, "Using Prompt API (rewrite)");
-                        const s = await getPromptSession();
-                        output = ensureText(
-                            await withTimeout(
-                                s.prompt(buildPrompt("rewrite", text)),
-                                30000,
-                                "Prompt rewrite timed out"
-                            )
+                        const sess = await getPromptSession();
+                        const r = await withTimeout(
+                            sess.prompt(`Rewrite the following text to improve clarity and flow without changing meaning.\n\n---\n${toStringSafe(text)}\n---`),
+                            30000,
+                            "Prompt rewrite timed out"
                         );
+                        output = ensureText(r);
                     }
                     break;
                 }
@@ -809,19 +828,16 @@
                 case "explain": {
                     try {
                         if ((await writerAvailability()) !== "unavailable") {
-                            output = await callWriterExplain(id, text);
+                            output = await callWriterExplainPersona(id, text, persona);
                         } else {
                             throw new Error("Writer not present");
                         }
                     } catch {
                         pingProgress(id, "Using Prompt API (explain)");
                         const s = await getPromptSession();
+                        const prompt = `${personaCtx(persona, "explain")}\n\n---\n${toStringSafe(text)}\n---`;
                         output = ensureText(
-                            await withTimeout(
-                                s.prompt(buildPrompt("explain", toStringSafe(text))),
-                                30000,
-                                "Prompt explain timed out"
-                            )
+                            await withTimeout(s.prompt(prompt), 30000, "Prompt explain timed out")
                         );
                     }
                     break;
@@ -832,7 +848,7 @@
                     const s = await getPromptSession();
                     output = ensureText(
                         await withTimeout(
-                            s.prompt(buildPrompt("comment_code", text)),
+                            s.prompt(`Add clear, explanatory comments to this code using appropriate line comment syntax. Do not change behavior. Return only the full commented code.\n\n---\n${toStringSafe(text)}\n---`),
                             30000,
                             "Prompt comment_code timed out"
                         )
@@ -843,18 +859,24 @@
                 default: {
                     let ok = false;
                     if ((await writerAvailability()) !== "unavailable") {
-                        try { output = await callWriterGeneric(id, text); ok = true; } catch {}
+                        try {
+                            pingProgress(id, "Using Writer API (generic)");
+                            const writer = await getWriter(id, personaWriterOpts(persona));
+                            const prompt = `Process the following text and return a concise, high-quality result:\n\n${toStringSafe(text)}`;
+                            const r = await withTimeout(writer.write(prompt, { context: "Generic transform" }), 20000, "Writer timed out");
+                            const s = ensureText(r);
+                            if (!isWriterMisfire(s)) { output = s; ok = true; }
+                        } catch {}
                     }
                     if (!ok) {
                         pingProgress(id, "Using Prompt API (generic)");
-                        const s = await getPromptSession();
-                        output = ensureText(
-                            await withTimeout(
-                                s.prompt(buildPrompt("generic", text)),
-                                30000,
-                                "Prompt generic timed out"
-                            )
+                        const sess = await getPromptSession();
+                        const r = await withTimeout(
+                            sess.prompt(`${personaCtx(persona, "explain")}\n\n---\n${toStringSafe(text)}\n---`),
+                            30000,
+                            "Prompt generic timed out"
                         );
+                        output = ensureText(r);
                     }
                 }
             }
