@@ -32,6 +32,7 @@ html, body {
     background: var(--bg);
     color: var(--fg);
     font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+    line-height: 1.45; /* Better readability */
 }
 
 #app {
@@ -45,7 +46,7 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 
 .pg-title {
@@ -73,7 +74,7 @@ html, body {
     padding: 6px 8px;
     border-radius: 8px;
     font-size: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
 }
 .pg-status.ok { color: var(--ok); }
 .pg-status.warn { color: var(--warn); }
@@ -83,15 +84,17 @@ html, body {
     background: var(--surface);
     border: 1px solid var(--border2);
     border-radius: 10px;
-    padding: 10px 12px;
+    padding: 12px 12px;
+    margin-bottom: 12px;
+}
+
+/* Section heading spacing */
+.section-title {
+    font-weight: 700;
     margin-bottom: 10px;
 }
 
-.section-title {
-    font-weight: 700;
-    margin-bottom: 8px;
-}
-
+/* Forms */
 .form-grid {
     display: grid;
     grid-template-columns: 1fr;
@@ -121,6 +124,7 @@ input:focus, .pg-select:focus {
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 28%, transparent);
 }
 
+/* Buttons */
 .pg-btn {
     background: #2f2f2f;
     color: #fff;
@@ -142,10 +146,11 @@ input:focus, .pg-select:focus {
 .pg-btn.danger { background: #7a1f1f; border-color: #6a1b1b; }
 .pg-btn.danger:hover { background: #8a2424; }
 
+/* Divider */
 .divider {
     text-align: center;
     color: var(--muted);
-    margin: 10px 0;
+    margin: 12px 0;
     position: relative;
 }
 .divider span {
@@ -164,6 +169,7 @@ input:focus, .pg-select:focus {
     z-index: 0;
 }
 
+/* Layout helpers */
 .row { display: flex; align-items: center; }
 .gap { gap: 8px; flex-wrap: wrap; }
 
@@ -176,6 +182,7 @@ input:focus, .pg-select:focus {
 }
 .w100 { width: 100%; }
 
+/* Toggles */
 .toggle {
     display: inline-flex;
     align-items: center;
@@ -184,10 +191,44 @@ input:focus, .pg-select:focus {
     cursor: pointer;
 }
 
+/* Typography helpers */
 .muted { color: var(--muted); font-size: 12px; }
-ul.muted { padding-left: 18px; }
+.small { font-size: 11px; }
 
-/* Responsive tweaks for ≤ 320px */
+/* Lists: better spacing for readability */
+ul, ol {
+    margin: 0 0 10px;
+    padding-left: 18px;
+}
+li {
+    margin-bottom: 6px;            /* extra space between list items */
+}
+li:last-child {
+    margin-bottom: 0;
+}
+ul.muted {
+    padding-left: 18px;
+}
+ul.muted > li {
+    color: var(--muted);
+    line-height: 1.4;
+    margin-bottom: 6px;
+}
+
+/* KBD keys styling for shortcuts */
+kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 11px;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-bottom-color: color-mix(in srgb, var(--border) 80%, black);
+    border-radius: 4px;
+    padding: 1px 4px;
+    box-shadow: inset 0 -1px 0 0 color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+/* Responsive tweaks for ≤ 340px */
 @media (max-width: 340px) {
     #app { padding: 8px; }
     .pg-title { font-size: 15px; }
