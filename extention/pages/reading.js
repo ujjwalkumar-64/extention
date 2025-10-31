@@ -216,7 +216,7 @@
             const actions = document.createElement("div");
             actions.className = "actions";
             // If you store quizId on attempts, you could open the quiz viewer here:
-             actions.append(makeBtn("Open", () => window.open(chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(a.id || "")}`), "_blank")));
+             actions.append(makeBtn("Open", () => window.open(chrome.runtime.getURL(`quiz/quiz.html?id=${encodeURIComponent(a.quizId || "")}`), "_blank")));
 
             row.append(left, sub, actions);
             it.append(row);

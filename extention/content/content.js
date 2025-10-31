@@ -1743,15 +1743,15 @@
         const mode = pgGetThemeMode();
         if (mode === "light") {
             return {
-                text: "#0b1220",
+                text: "#ffffff",
                 muted: "#4d5b78",
-                bg: "rgba(255,255,255,0.98)",
-                surface: "#f4f6fa",
+                bg: "rgb(253,0,174)",
+                surface: "#05aee6",
                 border: "rgba(0,0,0,0.14)",
                 border2: "rgba(0,0,0,0.08)",
                 focus: "#1d4ed8",
                 accent: "#2563eb",
-                panelBg: "#ffffff",
+                panelBg: "#020202",
                 toolbarBg: "rgba(20,21,24,0.97)", // keep dark bubble for contrast
                 toastBg: "rgba(30,30,30,0.95)",
                 btn: "#1f2937",
