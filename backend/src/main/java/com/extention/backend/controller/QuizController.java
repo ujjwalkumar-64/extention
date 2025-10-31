@@ -23,7 +23,7 @@ public class QuizController {
     private final QuizAttemptRepository attemptRepository;
     private final ObjectMapper objectMapper;
 
-    public record AttemptDto(Long id, int score, int questionsCount, String articleTitle, Instant createdAt) {}
+    public record AttemptDto(Long id, Long quizId, int score, int questionsCount, String articleTitle, Instant createdAt) {}
 
     public record GenerateRequest(String url) {}
     public record GenerateResponse(long id, String openUrl) {}
@@ -78,7 +78,8 @@ public class QuizController {
                             }
                         } catch (Exception ignore) {}
                     }
-                    return new AttemptDto(a.getId(), a.getScore(), count, title, a.getCreatedAt());
+                    assert a.getQuiz() != null;
+                    return new AttemptDto(a.getId(),a.getQuiz().getId(), a.getScore(), count, title, a.getCreatedAt());
                 })
                 .toList();
         return ResponseEntity.ok(list);
