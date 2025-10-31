@@ -15,23 +15,6 @@ PageGenie solves this by:
 - Automatically adding external references via web search when the model didn’t return citations.
 - Providing a personal Library (Hub) that collects your saved notes, curated suggestions, and quizzes for later study.
 
-## APIs used
-
-- Google Chrome AI Task APIs (on‑device; built into Chrome)
-    - Summarizer
-    - Translator
-    - Proofreader
-    - Rewriter
-    - Writer
-    - Prompt API (fallback within Chrome for generic prompts)
-- Google AI (Gemini) — cloud fallback for actions that aren’t available on‑device or on restricted pages
-- Google Custom Search JSON API (Programmable Search / CSE) — “Find sources” to attach 3–5 deduped references with short reasons
-- Chrome Extensions Platform APIs
-    - storage.sync (settings persistence: mode/persona/theme/targetLang/citeSources)
-    - runtime messaging (content ↔ background ↔ page bridge)
-    - contextMenus and commands (hotkeys, right‑click actions)
-    - tabs/scripting (Reader open, page bridge injection)
-
 ## Highlights
 
 - On‑device first (Chrome AI Task APIs) with privacy and speed
@@ -43,29 +26,6 @@ PageGenie solves this by:
 - Library (Hub): see your saved Notes, curated Suggestions, and generated Quizzes in one place
 - Clear UX: “Used: On‑device/Cloud”, “Why cloud?” tooltip, empty‑state hint, light/dark themes
 - Theming, Floating Action Button (FAB), keyboard shortcuts, and onboarding for first‑time users
-
-## On‑device vs Cloud (how it decides)
-
-- Modes
-    - Auto (default): Try on‑device first → fall back to cloud if unavailable.
-    - Offline‑only: Use on‑device only; never call cloud or web search (manual “Find sources” still works).
-    - Online‑only: Skip on‑device; use cloud for maximum compatibility.
-
-- When we use cloud (common reasons shown under “Why cloud?” in the footer)
-    - On‑device runtime not ready (first‑run, model download not finished, or API unavailable on this page).
-    - The requested action isn’t supported on‑device (or needs structured citations not provided by the device task).
-    - Restricted context (certain chrome:// or store pages) or iframe sandboxing prevents on‑device APIs.
-    - Explicit user choice (Online‑only mode).
-    - Large selections are trimmed for cloud; on‑device path runs first and does not upload text if it succeeds.
-
-- Data handling
-    - On‑device: Runs locally; content isn’t sent to a server.
-    - Cloud: Sends only the operation payload (selection text plus minimal metadata like persona/language). We show “Used: Cloud” and provide “Why cloud?” details for transparency.
-
-- Visual indicators
-    - Footer microcopy in panels:
-        - Tip: On‑device when available; falls back to cloud. Used: On‑device/Cloud
-        - “Why cloud?” tooltip explains the reason for cloud routing.
 
 ## Quick start
 
@@ -79,7 +39,11 @@ PageGenie solves this by:
 2) Backend setup (Spring Boot)
 ```bash
 # From the server project root
-export GOOGLE_API_KEY=your_gemini_key
+export SPRING_DATASOURCE_URL=your_database_url
+export SPRING_DATASOURCE_USERNAME=your_database_username
+export SPRING_DATASOURCE_PASSWORD=your_database_password
+
+export GEMINI_API_KEY=your_gemini_key
 export GOOGLE_CSE_API_KEY=your_cse_key
 export GOOGLE_CSE_CX=your_cse_cx
 ./mvnw spring-boot:run
@@ -97,6 +61,27 @@ export GOOGLE_CSE_CX=your_cse_cx
     - Explain → heading “Explanation”
     - If no citations, PageGenie auto‑finds sources via CSE and appends “— found by search”
     - “Find sources” action returns a References‑only panel
+
+## Configuration
+
+Environment variables (backend):
+- SPRING_DATASOURCE_URL: PostgreSQL Database Url
+- SPRING_DATASOURCE_USERNAME: PostgreSQL Database Username
+- SPRING_DATASOURCE_PASSWORD: PostgreSQL Database Password
+- GOOGLE_API_KEY: Gemini key for cloud fallback
+- GOOGLE_CSE_API_KEY: Google Custom Search JSON API key
+- GOOGLE_CSE_CX: Custom Search Engine ID (set to “Search the entire web”)
+
+Optional:
+- SERVER_PORT (Spring), CORS if hosting separately
+
+Chrome extension:
+- The popup controls:
+    - Mode, Show toolbar on selection, Floating button
+    - Target language, Theme, Persona
+    - Cite sources (persisted), which:
+        - Asks the model for citations when possible
+        - Auto‑adds sources via CSE when the model returns none (unless Offline‑only)
 
 ## Features
 
@@ -147,23 +132,49 @@ export GOOGLE_CSE_CX=your_cse_cx
 - Quizzes: browse and resume quizzes generated from selections
 - Open from the popup via “Open Hub” (pages/reading.html)
 
-## Configuration
 
-Environment variables (backend):
-- GOOGLE_API_KEY: Gemini key for cloud fallback
-- GOOGLE_CSE_API_KEY: Google Custom Search JSON API key
-- GOOGLE_CSE_CX: Custom Search Engine ID (set to “Search the entire web”)
+## On‑device vs Cloud (how it decides)
 
-Optional:
-- SERVER_PORT (Spring), CORS if hosting separately
+- Modes
+    - Auto (default): Try on‑device first → fall back to cloud if unavailable.
+    - Offline‑only: Use on‑device only; never call cloud or web search (manual “Find sources” still works).
+    - Online‑only: Skip on‑device; use cloud for maximum compatibility.
 
-Chrome extension:
-- The popup controls:
-    - Mode, Show toolbar on selection, Floating button
-    - Target language, Theme, Persona
-    - Cite sources (persisted), which:
-        - Asks the model for citations when possible
-        - Auto‑adds sources via CSE when the model returns none (unless Offline‑only)
+- When we use cloud (common reasons shown under “Why cloud?” in the footer)
+    - On‑device runtime not ready (first‑run, model download not finished, or API unavailable on this page).
+    - The requested action isn’t supported on‑device (or needs structured citations not provided by the device task).
+    - Restricted context (certain chrome:// or store pages) or iframe sandboxing prevents on‑device APIs.
+    - Explicit user choice (Online‑only mode).
+    - Large selections are trimmed for cloud; on‑device path runs first and does not upload text if it succeeds.
+
+- Data handling
+    - On‑device: Runs locally; content isn’t sent to a server.
+    - Cloud: Sends only the operation payload (selection text plus minimal metadata like persona/language). We show “Used: Cloud” and provide “Why cloud?” details for transparency.
+
+- Visual indicators
+    - Footer microcopy in panels:
+        - Tip: On‑device when available; falls back to cloud. Used: On‑device/Cloud
+        - “Why cloud?” tooltip explains the reason for cloud routing.
+
+
+
+## APIs used
+
+- Google Chrome AI Task APIs (on‑device; built into Chrome)
+    - Summarizer
+    - Translator
+    - Proofreader
+    - Rewriter
+    - Writer
+    - Prompt API (fallback within Chrome for generic prompts)
+- Google AI (Gemini) — cloud fallback for actions that aren’t available on‑device or on restricted pages
+- Google Custom Search JSON API (Programmable Search / CSE) — “Find sources” to attach 3–5 deduped references with short reasons
+- Chrome Extensions Platform APIs
+    - storage.sync (settings persistence: mode/persona/theme/targetLang/citeSources)
+    - runtime messaging (content ↔ background ↔ page bridge)
+    - contextMenus and commands (hotkeys, right‑click actions)
+    - tabs/scripting (Reader open, page bridge injection)
+
 
 ## Troubleshooting
 
@@ -187,10 +198,12 @@ Chrome extension:
 - Page bridge connects content to Chrome Task APIs and reports readiness/progress
 - Backend provides:
     - /api/v1/ai (Gemini structured/plain)
+    - /api/v1/ai/compare-concept (Compare concept drill based on saved notes)
     - /api/v1/sources/find (Google CSE for references)
     - /api/notes (store selections as notes)
     - /api/v1/reading/suggest (curated links)
     - /api/v1/quiz/generate-from-text (quiz)
+    - /api/v1/ops/log (log generate in db)
 - Robust JSON parsing for structured outputs (fenced/quoted/noisy JSON supported)
 - Error handling propagates upstream HTTP status to the UI
 
