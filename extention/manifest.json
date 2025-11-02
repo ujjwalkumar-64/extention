@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PageGenie",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI tools for any web page.",
   "action": {
     "default_title": "PageGenie",
@@ -16,7 +16,7 @@
     "webNavigation"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://pagegenie-backend.onrender.com/*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -79,9 +79,8 @@
 
   "options_ui": {
     "page": "options/options.html"
-
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' https://pagegenie-backend.onrender.com;"
   }
 }
