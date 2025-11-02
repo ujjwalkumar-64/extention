@@ -241,7 +241,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
             }
 
             const { backendUrl, apiToken } = await chrome.storage.sync.get({
-                backendUrl: "http://localhost:8098",
+                backendUrl: "https://pagegenie-backend.onrender.com",
                 apiToken: ""
             });
 
@@ -312,7 +312,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             try {
                 const { endpoint, payload } = msg;
                 const { backendUrl, apiToken, tokenExp } = await chrome.storage.sync.get({
-                    backendUrl: "http://localhost:8098",
+                    backendUrl: "https://pagegenie-backend.onrender.com",
                     apiToken: "",
                     tokenExp: 0
                 });
@@ -371,7 +371,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             try {
                 const { username, password, fullName, path } = msg;
                 if (!username || !password || !fullName) throw new Error("Full name, username and password are required.");
-                const { backendUrl } = await chrome.storage.sync.get({ backendUrl: "http://localhost:8098" });
+                const { backendUrl } = await chrome.storage.sync.get({ backendUrl: "https://pagegenie-backend.onrender.com" });
                 if (!backendUrl) throw new Error("Backend URL not configured in Options.");
                 const url = new URL(path || "/api/v1/auth/signup", backendUrl).toString();
 
@@ -408,7 +408,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 const { selectionText, pageUrl } = msg;
                 if (!selectionText) throw new Error("No selection text provided.");
                 const { backendUrl, apiToken } = await chrome.storage.sync.get({
-                    backendUrl: "http://localhost:8098",
+                    backendUrl: "https://pagegenie-backend.onrender.com",
                     apiToken: ""
                 });
                 if (!backendUrl) throw new Error("Backend URL not configured in Options.");
@@ -448,7 +448,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             try {
                 const { username, password, path } = msg;
                 if (!username || !password) throw new Error("Username and password are required.");
-                const { backendUrl } = await chrome.storage.sync.get({ backendUrl: "http://localhost:8098" });
+                const { backendUrl } = await chrome.storage.sync.get({ backendUrl: "https://pagegenie-backend.onrender.com" });
                 const loginPath = path || "/api/v1/auth/login";
                 const url = new URL(loginPath, backendUrl).toString();
 

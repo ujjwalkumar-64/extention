@@ -38,7 +38,7 @@
     });
 
     const { backendUrl, apiToken } = await chrome.storage.sync.get({
-        backendUrl: "http://localhost:8098",
+        backendUrl: "https://pagegenie-backend.onrender.com",
         apiToken: ""
     });
 

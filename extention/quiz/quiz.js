@@ -29,7 +29,7 @@
     async function getAuth() {
         return new Promise((resolve) => {
             chrome.storage.sync.get(
-                { backendUrl: "http://localhost:8098", apiToken: "" },
+                { backendUrl: "https://pagegenie-backend.onrender.com", apiToken: "" },
                 resolve
             );
         });

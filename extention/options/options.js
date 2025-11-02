@@ -6,7 +6,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const status = document.getElementById("status");
 
     const st = await chrome.storage.sync.get({
-        backendUrl: "http://localhost:8098",
+        backendUrl: "https://pagegenie-backend.onrender.com",
         apiToken: ""
     });
     backendUrl.value = st.backendUrl || "http://localhost:8098";
