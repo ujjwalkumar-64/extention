@@ -2,6 +2,7 @@
 
 PageGenie turns any web page into a research‑ready, readable summary with citations. It runs on‑device first using Chrome’s built‑in AI Task APIs for speed and privacy, then falls back to cloud only when needed—adding source links automatically when the model doesn’t provide them.
 
+## Demo video (public)
 Watch a short ~3 minute demo of PageGenie on YouTube:
 https://www.youtube.com/watch?v=L_lfpaK_Vfw
 
